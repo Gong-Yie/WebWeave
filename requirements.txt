@@ -8,13 +8,13 @@ langchain-core==0.2.0
 python-dotenv==0.20.0
 
 # 路径处理
-pathlib - 内置模块
+pathlib
 
 # JSON处理
-json - 内置模块
+json
 
 # 操作系统功能
-os - 内置模块
+os
 
 # HTTP请求
 requests==2.27.1
