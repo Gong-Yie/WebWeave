@@ -1,0 +1,20 @@
+# Agent 项目依赖
+
+# 核心依赖
+langchain-openai==0.1.0
+langchain-core==0.2.0
+
+# 环境变量管理
+python-dotenv==0.20.0
+
+# 路径处理
+pathlib - 内置模块
+
+# JSON处理
+json - 内置模块
+
+# 操作系统功能
+os - 内置模块
+
+# HTTP请求
+requests==2.27.1
