@@ -36,4 +36,5 @@ if tavily_api_key:
 else:
     @tool("tavily_tool")
     def tavily_tool(query: str) -> str:
+        """使用 Tavily API 进行网络搜索，返回搜索结果摘要。"""
         return "未设置环境变量 TAVILY_API_KEY，无法进行联网搜索。请补充 TAVILY_API_KEY 后重试。"

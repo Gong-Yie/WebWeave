@@ -1,20 +1,11 @@
 # Agent 项目依赖
 
 # 核心依赖
-langchain-openai==0.1.0
-langchain-core==0.2.0
+langchain==1.2.13
+langchain-openai==1.1.12
+langchain-core==1.2.23
+langchain_community==0.4.1
 
 # 环境变量管理
-python-dotenv==0.20.0
+python-dotenv
 
-# 路径处理
-pathlib
-
-# JSON处理
-json
-
-# 操作系统功能
-os
-
-# HTTP请求
-requests==2.27.1
