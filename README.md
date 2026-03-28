@@ -62,25 +62,49 @@ git clone git@github.com:Gong-Yie/WebWeave.git
 cd WebWeave
 ```
 
-### 2. 安装依赖
+### 2. 创建虚拟环境（可选）
 
 ```bash
+python -m venv web
+```
+
+#### 激活
+
+windows
+
+```bash
+web\Scripts\activate
+```
+
+linux
+
+```bash
+source web/bin/activate
+```
+
+
+### 3. 安装依赖
+
+```bash
+python.exe -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
+### 4. 配置环境变量
 
 在 `.env` 文件中配置以下环境变量：
 
 ```
 # .env 文件
 DEEPSEEK_API_KEY=your_api_key_here
-TAVILY_API_KEY=your_api_key_here
+TAVILY_API_KEY=your_api_key_here(可选)
 ```
 
-### 4. 准备资源文件
+## 使用方法
 
-将源码文件放置在 `resources` 目录中：
+### 1. 创建resources（如果没有）
+
+然后把idea放在resources中
 
 ```
 WebWeave/
@@ -88,15 +112,13 @@ WebWeave/
     └── 你的网页idea
 ```
 
-## 使用方法
-
-### 1. 启动代理
+### 2. 启动代理
 
 ```bash
 python core.py
 ```
 
-### 2. 交互流程
+### 3. 交互流程
 
 1. **资源分析**：代理会自动扫描 resources 目录中的文件
 2. **技术栈识别**：大模型会分析技术栈和前后端分类
@@ -104,7 +126,7 @@ python core.py
 4. **项目生成**：根据用户需求生成完整的项目结构和代码
 5. **结果查看**：生成的代码会保存在 `result` 目录中
 
-### 3. 自定义配置
+### 4. 自定义配置
 
 可以通过修改 `core.py` 中的参数来调整代理的行为：
 
@@ -124,6 +146,9 @@ python core.py
 ## 示例输出
 
 ### 生成的项目结构示例
+
+flask示例
+
 
 ```
 result/
