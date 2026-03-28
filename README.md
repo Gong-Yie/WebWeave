@@ -112,7 +112,7 @@ WebWeave/
     └── 你的网页idea
 ```
 
-### 2. 启动代理
+### 2. 启动agent
 
 ```bash
 python core.py
