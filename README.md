@@ -11,7 +11,7 @@ WebWeave 是一个基于 LangChain 框架开发的智能网页生成代理，能
 ## 技术栈
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![LangChain](https://img.shields.io/badge/LangChain-0.2.0-green.svg)](https://github.com/langchain-ai/langchain)
+[![LangChain](https://img.shields.io/badge/LangChain-1.0.0-green.svg)](https://github.com/langchain-ai/langchain)
 [![License](https://img.shields.io/badge/License-Apache%202.0-red.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
 ## 项目结构
