@@ -1,0 +1,60 @@
+{
+  "llm": {
+    "main": {
+      "model": "deepseek-v4-flash",
+      "base_url": "https://api.deepseek.com",
+      "api_key": ""
+    },
+    "vision": {
+      "enabled": true,
+      "model": "deepseek-v4-flash-vision-exp",
+      "base_url": "https://api.deepseek.com",
+      "api_key": ""
+    }
+  },
+  "tools": {
+    "list_skills": {
+      "enabled": true,
+      "run_scoped": false
+    },
+    "read_skill": {
+      "enabled": true,
+      "run_scoped": false
+    },
+    "web_search": {
+      "enabled": true,
+      "run_scoped": true
+    },
+    "create_file": {
+      "enabled": true,
+      "run_scoped": true
+    },
+    "file_read": {
+      "enabled": true,
+      "run_scoped": true
+    },
+    "terminal_run": {
+      "enabled": true,
+      "run_scoped": true
+    },
+    "web_instance": {
+      "enabled": true,
+      "run_scoped": true
+    }
+  },
+  "model": {
+    "stream": true
+  },
+  "tool_timeout": {
+    "default_seconds": 120.0,
+    "max_seconds": 1800.0
+  },
+  "context": {
+    "enabled": true,
+    "max_input_tokens": 1000000,
+    "compression_trigger_ratio": 0.8,
+    "keep_recent_items": 12,
+    "summary_max_tokens": 2000,
+    "compression_timeout_seconds": 120.0
+  }
+}

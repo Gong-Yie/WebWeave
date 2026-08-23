@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="WebWeave 本地 Agent 工作台" />
+    <title>WebWeave 工作台</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主导航和对话历史">
+        <div class="brand-row">
+          <div class="brand" aria-label="WebWeave">
+            <span class="brand-mark">W</span>
+            <span class="brand-name">WebWeave</span>
+          </div>
+          <button id="sidebar-toggle" class="icon-button subtle sidebar-toggle" type="button" title="收起侧栏" aria-label="收起侧栏">
+            <i data-lucide="panel-left-close"></i>
+          </button>
+        </div>
+
+        <nav class="primary-nav">
+          <button class="nav-item is-active" data-view="home" type="button"><i data-lucide="house"></i><span>主页</span></button>
+          <button class="nav-item" data-view="workspace" type="button"><i data-lucide="play"></i><span>开始工作</span></button>
+          <button class="nav-item" data-view="skills" type="button"><i data-lucide="sparkles"></i><span>Skills</span></button>
+          <button class="nav-item" data-view="settings" type="button"><i data-lucide="settings-2"></i><span>设置</span></button>
+        </nav>
+
+        <section class="conversation-history" aria-label="对话历史">
+          <header>
+            <span>对话</span>
+            <button id="new-run" class="icon-button subtle" type="button" title="新建对话" aria-label="新建对话"><i data-lucide="square-pen"></i></button>
+          </header>
+          <div id="history-list" class="history-list"></div>
+        </section>
+
+        <div class="sidebar-footer">
+          <span id="connection-dot" class="connection-dot"></span>
+          <div><strong>本地服务</strong><span id="connection-label">连接中</span></div>
+        </div>
+      </aside>
+
+      <main class="main-stage">
+        <section id="home-view" class="view home-view is-active" aria-label="主页">
+          <header class="home-header">
+            <div><span class="eyebrow">WebWeave</span><h1>今天准备构建什么？</h1><p>开始新的网页任务，或继续已有对话。</p></div>
+            <button id="home-new-run" class="button button-primary" type="button"><i data-lucide="square-pen"></i>新建对话</button>
+          </header>
+          <div class="home-content">
+            <section class="home-start">
+              <button id="home-start-button" type="button">
+                <span class="home-start-icon"><i data-lucide="wand-sparkles"></i></span>
+                <span><strong>开始新的网页任务</strong><small>创建独立运行并进入工作台</small></span>
+                <i data-lucide="arrow-right"></i>
+              </button>
+            </section>
+            <section class="recent-runs">
+              <header><h2>最近工作</h2><span id="recent-count">0 个对话</span></header>
+              <div id="recent-run-list" class="recent-run-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="workspace-view" class="view" aria-label="工作台">
+          <header class="workspace-header">
+            <div class="active-run-heading"><strong id="active-run-title">新对话</strong><span id="active-run-id">尚未选择</span></div>
+            <div class="header-actions">
+              <span class="run-status"><span></span>等待输入</span>
+              <button id="inspector-toggle" class="icon-button" type="button" title="隐藏执行检查区" aria-label="隐藏执行检查区"><i data-lucide="panel-right-close"></i></button>
+            </div>
+          </header>
+
+          <div id="workspace-grid" class="workspace-grid">
+            <section class="conversation" aria-label="对话内容">
+              <div id="conversation-scroll" class="conversation-scroll"></div>
+              <div class="composer-wrap">
+                <div id="attachment-list" class="attachment-list"></div>
+                <div class="composer">
+                  <textarea id="prompt-input" rows="4" placeholder="描述你想构建或修改的内容" aria-label="任务输入"></textarea>
+                  <div class="composer-toolbar">
+                    <div class="composer-left">
+                      <input id="file-input" type="file" multiple hidden />
+                      <button id="attach-button" class="icon-button composer-icon" type="button" title="上传附件" aria-label="上传附件"><i data-lucide="paperclip"></i></button>
+                      <span class="composer-hint">附件</span>
+                    </div>
+                    <button id="primary-action" class="send-button" type="button"><span>发送</span><i data-lucide="arrow-up"></i></button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <div id="resize-handle" class="resize-handle" aria-label="调整检查区宽度"></div>
+
+            <aside id="inspector" class="inspector" aria-label="执行检查区">
+              <header class="inspector-header">
+                <div class="inspector-tabs" role="tablist">
+                  <button class="inspector-tab is-active" data-tab="activity" type="button">执行</button>
+                  <button class="inspector-tab" data-tab="files" type="button">文件</button>
+                  <button class="inspector-tab" data-tab="instance" type="button">实例</button>
+                </div>
+                <button id="close-inspector" class="icon-button subtle" type="button" title="隐藏检查区" aria-label="隐藏检查区"><i data-lucide="x"></i></button>
+              </header>
+
+              <div id="activity-panel" class="inspector-panel is-active">
+                <div class="panel-heading">
+                  <div><span class="eyebrow">运行概况</span><h2>执行检查</h2></div>
+                  <span id="activity-status" class="success-badge">等待</span>
+                </div>
+                <dl class="run-facts">
+                  <div><dt>运行 ID</dt><dd id="fact-run-id">-</dd></div>
+                  <div><dt>工具调用</dt><dd id="fact-tool-count">0</dd></div>
+                  <div><dt>事件</dt><dd id="fact-event-count">0</dd></div>
+                </dl>
+                <div class="section-heading"><h3>调用记录</h3><button id="activity-refresh" class="icon-button subtle" type="button" title="刷新"><i data-lucide="refresh-cw"></i></button></div>
+                <div id="tool-list" class="tool-list"></div>
+              </div>
+
+              <div id="files-panel" class="inspector-panel">
+                <div id="file-browser" class="file-browser">
+                  <div class="panel-heading compact">
+                    <div><span id="files-run-id" class="eyebrow">未选择</span><h2>文件</h2></div>
+                    <button id="files-refresh" class="icon-button subtle" type="button" title="刷新文件树"><i data-lucide="refresh-cw"></i></button>
+                  </div>
+                  <div id="file-tree" class="file-tree" role="tree"></div>
+                </div>
+                <div id="file-preview" class="file-preview" hidden>
+                  <header class="preview-header">
+                    <button id="back-to-tree" class="icon-button subtle" type="button" title="返回文件树"><i data-lucide="arrow-left"></i></button>
+                    <div><strong id="preview-name"></strong><span id="preview-meta"></span></div>
+                    <button id="copy-file" class="icon-button subtle" type="button" title="复制内容"><i data-lucide="copy"></i></button>
+                  </header>
+                  <pre id="preview-code" class="code-preview"></pre>
+                  <div id="preview-image" class="image-preview" hidden><img id="preview-image-content" alt="文件预览" /><p id="preview-image-meta"></p></div>
+                </div>
+              </div>
+
+              <div id="instance-panel" class="inspector-panel instance-panel">
+                <div class="instance-toolbar">
+                  <div class="instance-address"><span id="instance-live-dot" class="live-dot"></span><span id="instance-address">未启动</span></div>
+                  <div>
+                    <button id="instance-refresh" class="icon-button subtle" type="button" title="刷新实例"><i data-lucide="refresh-cw"></i></button>
+                    <button id="instance-restart" class="icon-button subtle" type="button" title="重启实例"><i data-lucide="rotate-cw"></i></button>
+                    <button id="instance-open" class="icon-button subtle" type="button" title="在新窗口打开"><i data-lucide="external-link"></i></button>
+                    <button id="instance-stop" class="icon-button subtle danger" type="button" title="停止实例"><i data-lucide="square"></i></button>
+                  </div>
+                </div>
+                <div class="instance-controls">
+                  <div class="inspect-modes" aria-label="实例交互模式">
+                    <button class="inspect-mode is-active" type="button" data-mode="preview" title="正常预览"><i data-lucide="mouse-pointer-2"></i><span>预览</span></button>
+                    <button class="inspect-mode" type="button" data-mode="component" title="选择页面组件"><i data-lucide="scan-search"></i><span>组件</span></button>
+                    <button class="inspect-mode" type="button" data-mode="point" title="选择页面坐标并评价"><i data-lucide="crosshair"></i><span>定点</span></button>
+                  </div>
+                  <div class="viewport-controls" aria-label="实例尺寸">
+                    <button class="viewport-button is-active" type="button" data-width="100%" title="桌面"><i data-lucide="monitor"></i></button>
+                    <button class="viewport-button" type="button" data-width="768px" title="平板"><i data-lucide="tablet"></i></button>
+                    <button class="viewport-button" type="button" data-width="390px" title="手机"><i data-lucide="smartphone"></i></button>
+                  </div>
+                </div>
+                <div class="instance-canvas">
+                  <iframe id="instance-frame" title="生成应用实例预览"></iframe>
+                  <div id="instance-empty" class="instance-empty">当前对话没有运行中的实例</div>
+                </div>
+                <div id="selection-context" class="selection-context" hidden>
+                  <span id="selection-kind" class="selection-kind">组件</span>
+                  <div class="selection-copy"><strong id="selection-title"></strong><small id="selection-detail"></small></div>
+                  <button id="inject-selection" class="button button-primary compact" type="button"><i data-lucide="corner-left-up"></i>加入输入框</button>
+                  <button id="clear-selection" class="icon-button subtle" type="button" title="清除选择" aria-label="清除选择"><i data-lucide="x"></i></button>
+                </div>
+              </div>
+            </aside>
+
+            <button id="inspector-rail" class="inspector-rail" type="button" title="展开执行检查区" aria-label="展开执行检查区"><i data-lucide="panel-right-open"></i><span>检查</span></button>
+          </div>
+        </section>
+
+        <section id="skills-view" class="view skills-view" aria-label="Skills">
+          <header class="skills-header">
+            <div><span class="eyebrow">data/skills</span><h1>Skills</h1><p>查看当前工作台可用的本地能力。</p></div>
+          </header>
+          <div class="skills-content">
+            <div id="skills-list" class="skills-list"></div>
+            <div id="skills-errors" class="skills-errors" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <section id="settings-view" class="view settings-view" aria-label="设置">
+          <header class="settings-header">
+            <div><span id="settings-eyebrow" class="eyebrow">config.json</span><h1 id="settings-title">配置</h1><p id="settings-description">保存后由 Agent 热加载。</p></div>
+            <div class="settings-actions"><span id="settings-state" class="unsaved-state"><span></span>配置已同步</span><button id="settings-save" class="button button-primary" type="button"><i data-lucide="save"></i>保存</button></div>
+          </header>
+          <nav class="settings-tabs" aria-label="设置分类">
+            <button class="settings-tab is-active" data-settings-page="config" type="button"><i data-lucide="sliders-horizontal"></i><span>配置</span></button>
+            <button class="settings-tab" data-settings-page="llm" type="button"><i data-lucide="bot"></i><span>大模型</span></button>
+            <button class="settings-tab" data-settings-page="style" type="button"><i data-lucide="palette"></i><span>样式</span></button>
+          </nav>
+          <div id="settings-config-page" class="settings-page is-active">
+            <div class="settings-content">
+              <section class="settings-section">
+                <div class="settings-copy"><h2>模型输出</h2><p>控制 Responses API 的输出方式。</p></div>
+                <div class="context-settings">
+                  <div class="setting-line"><span><strong>流式输出</strong><small>生成过程中逐步显示内容</small></span><label class="switch"><input id="model-stream" type="checkbox" /><span></span></label></div>
+                </div>
+              </section>
+              <section class="settings-section">
+                <div class="settings-copy"><h2>工具</h2><p>启用状态与运行隔离。</p></div>
+                <div id="settings-tools" class="settings-table"><div class="settings-row settings-table-head"><span>工具名称</span><span>启用</span><span>运行隔离</span></div></div>
+              </section>
+              <section class="settings-section">
+                <div class="settings-copy"><h2>工具超时</h2><p>单次调用默认值与最大值。</p></div>
+                <div class="field-grid">
+                  <label><span>默认超时</span><div class="number-field"><input id="timeout-default" type="number" min="0.1" step="0.1" /><em>秒</em></div></label>
+                  <label><span>最大超时</span><div class="number-field"><input id="timeout-max" type="number" min="0.1" step="0.1" /><em>秒</em></div></label>
+                </div>
+              </section>
+              <section class="settings-section">
+                <div class="settings-copy"><h2>上下文压缩</h2><p>达到阈值后自动生成摘要。</p></div>
+                <div class="context-settings">
+                  <div class="setting-line"><span><strong>启用自动压缩</strong><small>使用当前 Agent 模型</small></span><label class="switch"><input id="context-enabled" type="checkbox" /><span></span></label></div>
+                  <div class="field-grid">
+                    <label><span>最大输入 Token</span><input id="context-max-input" type="number" min="1" /></label>
+                    <label><span>触发比例</span><input id="context-trigger" type="number" min="0.01" max="0.99" step="0.01" /></label>
+                    <label><span>保留最近项目</span><input id="context-keep" type="number" min="1" /></label>
+                    <label><span>摘要最大 Token</span><input id="context-summary" type="number" min="1" /></label>
+                    <label><span>压缩超时</span><div class="number-field"><input id="context-timeout" type="number" min="0.1" step="0.1" /><em>秒</em></div></label>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+          <div id="settings-llm-page" class="settings-page">
+            <div class="settings-content">
+              <section class="settings-section">
+                <div class="settings-copy"><h2>主模型</h2><p>负责理解任务、调用工具并生成最终结果。</p></div>
+                <div class="llm-fields">
+                  <label><span>模型名称</span><input id="llm-main-model" type="text" autocomplete="off" /></label>
+                  <label><span>兼容接口地址</span><input id="llm-main-base-url" type="url" autocomplete="off" /></label>
+                  <label><span>API Key</span><input id="llm-main-api-key" type="text" autocomplete="new-password" placeholder="请输入 API Key" /></label>
+                </div>
+              </section>
+              <section class="settings-section">
+                <div class="settings-copy"><h2>视觉模型</h2><p>启用后先将图片转成文字和视觉描述，再交给主模型。</p></div>
+                <div class="llm-fields">
+                  <div class="setting-line"><span><strong>启用视觉模型</strong><small>未启用时由主模型直接识别图片</small></span><label class="switch"><input id="llm-vision-enabled" type="checkbox" /><span></span></label></div>
+                  <label><span>模型名称</span><input id="llm-vision-model" type="text" autocomplete="off" /></label>
+                  <label><span>兼容接口地址</span><input id="llm-vision-base-url" type="url" autocomplete="off" /></label>
+                  <label><span>API Key</span><input id="llm-vision-api-key" type="text" autocomplete="new-password" placeholder="请输入 API Key" /></label>
+                </div>
+              </section>
+            </div>
+          </div>
+          <div id="settings-style-page" class="settings-page">
+            <div class="settings-content">
+              <section class="settings-section">
+                <div class="settings-copy"><h2>界面主题</h2><p>选择工作台的明暗外观。</p></div>
+                <div class="theme-options" role="radiogroup" aria-label="界面主题">
+                  <label class="theme-option">
+                    <input type="radio" name="appearance-theme" value="system" />
+                    <span class="theme-preview theme-preview-system" aria-hidden="true"><span></span><span></span></span>
+                    <span class="theme-label"><strong>跟随系统</strong><small>自动匹配系统外观</small></span>
+                    <i data-lucide="check"></i>
+                  </label>
+                  <label class="theme-option">
+                    <input type="radio" name="appearance-theme" value="light" />
+                    <span class="theme-preview theme-preview-light" aria-hidden="true"><span></span><span></span></span>
+                    <span class="theme-label"><strong>明亮</strong><small>清晰的浅色界面</small></span>
+                    <i data-lucide="check"></i>
+                  </label>
+                  <label class="theme-option">
+                    <input type="radio" name="appearance-theme" value="dark" />
+                    <span class="theme-preview theme-preview-dark" aria-hidden="true"><span></span><span></span></span>
+                    <span class="theme-label"><strong>暗色</strong><small>适合低光环境</small></span>
+                    <i data-lucide="check"></i>
+                  </label>
+                </div>
+              </section>
+              <section class="settings-section">
+                <div class="settings-copy"><h2>背景图</h2><p>使用本地图片替换工作台背景。</p></div>
+                <div class="background-control">
+                  <div id="background-preview" class="background-preview">
+                    <img id="background-preview-image" alt="当前背景图预览" hidden />
+                    <div id="background-empty" class="background-empty"><i data-lucide="image"></i><span><strong>未设置背景图</strong><small>支持 PNG、JPG、WebP，最大 2 MB</small></span></div>
+                  </div>
+                  <div class="background-actions">
+                    <input id="background-input" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+                    <button id="background-choose" class="button button-primary" type="button"><i data-lucide="image-plus"></i>选择图片</button>
+                    <button id="background-remove" class="button button-secondary" type="button"><i data-lucide="trash-2"></i>移除背景</button>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,11 +1,11 @@
 # Agent 项目依赖
 
-# 核心依赖
-langchain==1.2.13
-langchain-openai==1.1.12
-langchain-core==1.2.23
-langchain_community==0.4.1
+# OpenAI 兼容 API 客户端（当前默认连接 DeepSeek）
+openai>=1.66.0
 
 # 环境变量管理
 python-dotenv
+
+# 本地 Skill 的 YAML front matter 解析
+PyYAML>=6.0
 
