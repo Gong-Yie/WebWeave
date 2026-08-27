@@ -4,7 +4,13 @@ from collections.abc import Callable, Sequence
 from typing import Any
 from uuid import uuid4
 
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    APIStatusError,
+    OpenAI,
+    RateLimitError,
+)
 
 from tools.registry import ToolRegistry
 
@@ -12,13 +18,14 @@ from .config import CONFIG_MANAGER, build_openai_client, get_runtime_config
 from .context import _fallback_trim, compress_context, should_compress
 from .paths import prepare_run_directories
 from .prompt import SYSTEM_PROMPT
-from .run_store import RunStore
+from .run_store import RunStore, repair_input_items
 from .tools import call_value, execute_tool
 
 
 TOOL_REGISTRY = ToolRegistry()
 STREAM_EVENT_FLUSH_SECONDS = 0.2
 STREAM_EVENT_FLUSH_CHARS = 256
+LLM_MAX_ATTEMPTS = 5
 
 
 class AgentStopped(RuntimeError):
@@ -38,6 +45,10 @@ def run_messages(
     prepare_run_directories(active_run_id)
     store = run_store or RunStore(active_run_id)
     store.start()
+    repaired_items = repair_input_items(input_items)
+    if len(repaired_items) != len(input_items):
+        input_items[:] = repaired_items
+        store.save_context(input_items)
     store.save_context(input_items)
     iteration = 0
     try:
@@ -191,24 +202,62 @@ def _create_model_response(
     verbose: bool,
     should_stop: Callable[[], bool] | None,
 ) -> Any:
-    if not stream_enabled:
-        return client.responses.create(
-            model=model_name,
-            temperature=0.7,
-            instructions=instructions,
-            input=input_items,
-            tools=list(tool_definitions),
-        )
-    return _create_streaming_model_response(
-        client=client,
-        input_items=input_items,
-        tool_definitions=tool_definitions,
-        instructions=instructions,
-        model_name=model_name,
-        store=store,
-        verbose=verbose,
-        should_stop=should_stop,
-    )
+    for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+        try:
+            if not stream_enabled:
+                return client.responses.create(
+                    model=model_name,
+                    temperature=0.7,
+                    instructions=instructions,
+                    input=input_items,
+                    tools=list(tool_definitions),
+                )
+            return _create_streaming_model_response(
+                client=client,
+                input_items=input_items,
+                tool_definitions=tool_definitions,
+                instructions=instructions,
+                model_name=model_name,
+                store=store,
+                verbose=verbose,
+                should_stop=should_stop,
+            )
+        except Exception as exc:
+            if isinstance(exc, AgentStopped) or not _is_retryable_llm_error(exc):
+                raise
+            if attempt == LLM_MAX_ATTEMPTS:
+                raise RuntimeError(
+                    f"大模型请求连续失败 {LLM_MAX_ATTEMPTS} 次，最后错误: {exc}"
+                ) from exc
+            delay = min(2 ** (attempt - 1), 8)
+            store.append_event(
+                "llm_retry",
+                {
+                    "attempt": attempt,
+                    "next_attempt": attempt + 1,
+                    "delay_seconds": delay,
+                    "error": str(exc),
+                },
+            )
+            if verbose:
+                print(f"[LLM] 第 {attempt} 次请求失败，{delay} 秒后重试: {exc}")
+            if should_stop is not None and should_stop():
+                raise AgentStopped("用户请求停止") from exc
+            time.sleep(delay)
+    raise AssertionError("LLM 重试循环未正常结束")
+
+
+def _is_retryable_llm_error(exc: Exception) -> bool:
+    if isinstance(exc, (APIConnectionError, APITimeoutError, RateLimitError)):
+        return True
+    if isinstance(exc, APIStatusError):
+        return exc.status_code in {408, 409, 425, 429} or exc.status_code >= 500
+    return exc.__class__.__name__ in {
+        "RemoteProtocolError",
+        "ReadError",
+        "ConnectError",
+        "TimeoutException",
+    }
 
 
 def _create_streaming_model_response(

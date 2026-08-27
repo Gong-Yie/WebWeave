@@ -1,11 +1,13 @@
 import json
 import os
 import re
+import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any
+from uuid import uuid4
 
 from .config import RUN_ROOT
 
@@ -138,7 +140,7 @@ class RunStore:
         context = self._read_json(self.context_path)
         items = context.get("input_items")
         if isinstance(items, list):
-            return items
+            return repair_input_items(items)
         return self._rebuild_input_items()
 
     def read_state(self) -> dict[str, Any]:
@@ -203,9 +205,54 @@ class RunStore:
 
     @staticmethod
     def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
-        temporary_path = path.with_name(f".{path.name}.tmp")
+        temporary_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
         temporary_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        os.replace(temporary_path, path)
+        try:
+            for attempt in range(5):
+                try:
+                    os.replace(temporary_path, path)
+                    return
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+
+def repair_input_items(items: Sequence[Any]) -> list[Any]:
+    """移除恢复上下文中没有配对工具结果的调用，避免 API 拒绝整个请求。"""
+    function_calls: dict[str, Any] = {}
+    output_call_ids: set[str] = set()
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        item_type = str(item.get("type", ""))
+        if item_type == "function_call":
+            call_id = str(item.get("call_id") or item.get("id") or "")
+            if call_id:
+                function_calls[call_id] = item
+        elif item_type == "function_call_output":
+            call_id = str(item.get("call_id") or "")
+            if call_id:
+                output_call_ids.add(call_id)
+
+    valid_call_ids = set(function_calls) & output_call_ids
+    repaired: list[Any] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            repaired.append(item)
+            continue
+        item_type = str(item.get("type", ""))
+        if item_type == "function_call":
+            call_id = str(item.get("call_id") or item.get("id") or "")
+            if call_id not in valid_call_ids:
+                continue
+        elif item_type == "function_call_output":
+            if str(item.get("call_id") or "") not in valid_call_ids:
+                continue
+        repaired.append(item)
+    return repaired
