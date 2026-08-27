@@ -20,6 +20,7 @@ const state = {
     localStorage.getItem("webweave-sidebar-collapsed") === "true",
   inspectMode: "preview",
   config: null,
+  configReady: false,
   skills: [],
   skillErrors: [],
   appearance: {
@@ -974,9 +975,23 @@ function injectSelectionIntoPrompt() {
 }
 
 async function loadConfig() {
+  setConfigAvailability(false);
   const payload = await api("/api/config");
   state.config = payload.config;
   renderConfig();
+  setConfigAvailability(true);
+}
+
+function setConfigAvailability(available) {
+  state.configReady = available;
+  document
+    .querySelectorAll(
+      "#settings-config-page input, #settings-llm-page input, #settings-save",
+    )
+    .forEach((input) => {
+      input.disabled = !available;
+    });
+  if (available) setVisionFieldsState();
 }
 
 function renderConfig() {
@@ -1050,7 +1065,7 @@ function setVisionFieldsState() {
   const enabled = $("#llm-vision-enabled").checked;
   ["#llm-vision-model", "#llm-vision-base-url", "#llm-vision-api-key"].forEach(
     (selector) => {
-      $(selector).disabled = !enabled;
+      $(selector).disabled = !state.configReady || !enabled;
     },
   );
 }
@@ -1299,6 +1314,7 @@ async function poll() {
 async function initialize() {
   applyAppearance();
   bindEvents();
+  setConfigAvailability(false);
   applySidebarState();
   applyInspectorState();
   refreshIcons();
