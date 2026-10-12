@@ -29,9 +29,11 @@ func TestPathIsolation(t *testing.T) {
 	if strings.Contains(result, "失败") {
 		t.Fatal(result)
 	}
-	read, err := app.readFile(id, Args{FilePath: "result/nested/index.txt"})
-	if err != nil || read.(map[string]any)["content"] != text {
-		t.Fatalf("scoped read: %+v %v", read, err)
+	for _, path := range []string{"result/nested/index.txt", "nested/index.txt", "data/result/file-run/nested/index.txt"} {
+		read, err := app.readFile(id, Args{FilePath: path})
+		if err != nil || read.(map[string]any)["content"] != text {
+			t.Fatalf("scoped read %s: %+v %v", path, read, err)
+		}
 	}
 	for _, raw := range []string{"../escape", filepath.Join(app.runRoot("result", "other-run"), "secret.txt")} {
 		if _, err := app.createFile(context.Background(), id, Args{FilePath: raw, Content: &text}); err == nil {

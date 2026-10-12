@@ -525,7 +525,7 @@ func TestVisionAndCompression(t *testing.T) {
 			}
 			items := []inputItem{{"role": "user", "content": "旧任务"}, {"role": "assistant", "content": "旧答复"}, {"role": "user", "content": "最近任务"}, {"type": "function_call", "call_id": "pair"}, {"type": "function_call_output", "call_id": "pair", "output": "ok"}}
 			compressed, err := app.compressContext(context.Background(), client, run.store, items, cfg)
-			if err != nil || len(compressed) != 4 || itemString(compressed[2], "call_id") != "pair" || len(repairItems(compressed)) != len(compressed) {
+			if err != nil || len(compressed) != 5 || itemString(compressed[1], "content") != "旧任务" || itemString(compressed[3], "call_id") != "pair" || len(repairItems(compressed)) != len(compressed) {
 				t.Fatalf("compression broke tool pairing: %+v %v", compressed, err)
 			}
 			if !strings.Contains(itemString(compressed[0], "content"), "历史上下文摘要") {

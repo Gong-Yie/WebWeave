@@ -32,6 +32,9 @@ const systemPrompt = `你是一个“网页项目生成型 Agent”，使用完�
 每次工具调用必须填写 timeout（秒），默认 {timeout_default} 秒，最大 {timeout_max} 秒。
 一次响应可能包含多个工具调用，必须返回所有工具结果后继续下一轮，直到模型不再调用工具。
 缺少关键需求时向用户澄清。不得声称未执行的操作已经完成。
+执行节奏：先完成核心页面并启动预览，再检查影响使用的缺陷。用户未明确要求多页面时，优先交付完整单页网站，不自行扩大项目范围。
+不要用长篇设计文档、重复验证或反复全文读取代替交付。已生成源码以文件为准，修改时读取相关片段；终端检查只输出必要结论和证据。
+检查通过后停止该项检查；只修复有证据且影响交付的问题，不为轻微风格问题反复委派审计。
 安全边界：只能读取当前运行的 data/resources/{run_id}、data/result/{run_id}、data/download/{run_id}。
 只能通过 create_file 写入当前运行 result 目录，通过 web_search 下载到当前运行 download 目录。
 terminal_run 的 cwd 必须在当前运行的 resources、result 或 download 目录内。
@@ -51,11 +54,12 @@ func newClient(provider ProviderConfig) (openai.Client, error) {
 
 func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, agent AgentConfig, delegated bool) (string, error) {
 	ctx = context.WithValue(ctx, agentExecutionKey{}, agentExecution{agent, delegated})
-	items = repairItems(items)
+	items = compactModelContext(repairItems(items))
 	if err := saveAgentContext(ctx, store, items, nil); err != nil {
 		return "", err
 	}
-	for {
+	limit := agentRoundLimit(agent.ID)
+	for round := 0; ; round++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -71,6 +75,14 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 			}
 		}
 		params := responses.ResponseNewParams{Model: cfg.LLM.Main.Model, Instructions: openai.String(agentInstructions(agent, cfg, store.id)), Temperature: openai.Float(0.7), Tools: agentTools(agent, cfg)}
+		if round == limit {
+			params.Tools = nil
+			params.ToolChoice.OfToolChoiceMode = openai.Opt(responses.ToolChoiceOptionsNone)
+			params.Instructions = openai.String(params.Instructions.Value + "\n本次执行已达到工具轮次预算。本轮必须收尾：说明实际完成的文件、验证结果、预览入口和未完成事项，不再调用工具，不得把未完成任务说成已完成。")
+			if err := appendAgentEvent(ctx, store, "agent_budget_reached", map[string]any{"tool_rounds": limit}); err != nil {
+				return "", err
+			}
+		}
 		response, err := modelResponse(ctx, client, params, items, cfg.Model.Stream, store)
 		if err != nil {
 			return "", err
@@ -100,6 +112,9 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 				calls = append(calls, item)
 			}
 		}
+		if round == limit && (len(calls) > 0 || strings.TrimSpace(text) == "") {
+			return "", fmt.Errorf("%s 已达到 %d 轮工具预算，模型未按要求收尾；已有文件已保留", agent.Name, limit)
+		}
 		if len(calls) == 0 {
 			return text, ctx.Err()
 		}
@@ -124,6 +139,7 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 			if err := appendAgentEvent(ctx, store, "tool_output", map[string]any{"tool_name": name, "arguments": arguments, "duration_seconds": time.Since(started).Seconds(), "cancelled": cancelled, "item": item}); err != nil {
 				return "", err
 			}
+			items = compactModelContext(items)
 			if err := saveAgentContext(ctx, store, items, nil); err != nil {
 				return "", err
 			}
@@ -241,79 +257,6 @@ func validateResponse(response *responses.Response) (*responses.Response, error)
 func estimateTokens(items []inputItem) int {
 	data, _ := json.Marshal(items)
 	return max(1, (utf8.RuneCount(data)+1)/2)
-}
-
-func recentStart(items []inputItem, keep int) int {
-	start := max(0, len(items)-keep)
-	for start > 0 && (itemString(items[start], "type") == "function_call" || itemString(items[start], "type") == "function_call_output") {
-		start--
-	}
-	return start
-}
-
-func (a *App) compressContext(ctx context.Context, client openai.Client, store *runStore, items []inputItem, cfg RuntimeConfig) ([]inputItem, error) {
-	start := recentStart(items, cfg.Context.KeepRecentItems)
-	var summary map[string]any
-	var err error
-	if start > 0 {
-		history := make([]string, 0, start)
-		for _, item := range items[:start] {
-			data, marshalErr := json.Marshal(item)
-			if marshalErr != nil {
-				return nil, marshalErr
-			}
-			runes := []rune(string(data))
-			if len(runes) > 6000 {
-				runes = append(append(runes[:3000:3000], []rune("...[中间内容已截断]...")...), runes[len(runes)-3000:]...)
-			}
-			history = append(history, string(runes))
-		}
-		prompt := "你是上下文压缩器，不是任务执行者。保留任务目标、已确认决定、完成和未完成工作、文件路径、错误及最近用户意图。只返回 JSON 对象，字段为 goal、decisions、completed、pending、artifacts、errors、uncertain、latest_user_intent。不编造信息。\n" + strings.Join(history, "\n")
-		compressionCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.Context.TimeoutSeconds*float64(time.Second)))
-		response, requestErr := modelResponse(compressionCtx, client, responses.ResponseNewParams{Model: cfg.LLM.Main.Model, MaxOutputTokens: openai.Int(int64(cfg.Context.SummaryMaxTokens)), Temperature: openai.Float(0.1)}, prompt, false, nil)
-		cancel()
-		err = requestErr
-		if err == nil {
-			text := strings.TrimSpace(response.OutputText())
-			if strings.HasPrefix(text, "```") {
-				if i := strings.IndexByte(text, '\n'); i >= 0 {
-					text = text[i+1:]
-				}
-				text = strings.TrimSpace(strings.TrimSuffix(text, "```"))
-			}
-			err = json.Unmarshal([]byte(text), &summary)
-			if err == nil && summary == nil {
-				err = errors.New("压缩结果必须是 JSON 对象")
-			}
-		}
-	} else {
-		err = errors.New("没有可压缩的旧上下文")
-	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if err != nil {
-		slog.Warn("上下文压缩失败，保守截断", "run_id", store.id, "error", err)
-		start = recentStart(items, max(1, cfg.Context.KeepRecentItems/2))
-		summary = map[string]any{"goal": "历史压缩失败，以最近上下文和运行文件为准", "errors": []string{"模型上下文压缩失败，已执行保守截断"}, "pending": []string{"检查运行记录中的未完成任务"}}
-	}
-	for _, field := range []string{"goal", "decisions", "completed", "pending", "artifacts", "errors", "uncertain", "latest_user_intent"} {
-		if _, ok := summary[field]; !ok {
-			summary[field] = []string{}
-			if field == "goal" || field == "latest_user_intent" {
-				summary[field] = ""
-			}
-		}
-	}
-	data, err := json.Marshal(summary)
-	if err != nil {
-		return nil, err
-	}
-	compressed := append([]inputItem{{"role": "assistant", "content": "[历史上下文摘要]\n" + string(data)}}, items[start:]...)
-	if err := appendAgentEvent(ctx, store, "context_compressed", map[string]any{"summary": summary, "input_items": compressed, "removed_items": start, "tokens_before": estimateTokens(items), "tokens_after": estimateTokens(compressed)}); err != nil {
-		return nil, err
-	}
-	return compressed, saveAgentContext(ctx, store, compressed, summary)
 }
 
 func (a *App) prepareUserItem(ctx context.Context, id, text string, attachments []string) (inputItem, error) {

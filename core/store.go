@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"webweave/workspace"
@@ -165,6 +166,11 @@ func (s *runStore) saveInstance(record *instanceRecord) error {
 func (s *runStore) saveContext(items []inputItem, summary any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if summary == nil && len(items) > 0 && strings.HasPrefix(itemString(items[0], "content"), summaryPrefix) {
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(itemString(items[0], "content"), summaryPrefix)), &summary); err != nil {
+			return fmt.Errorf("保存上下文摘要: %w", err)
+		}
+	}
 	ctx := savedContext{1, workspace.Timestamp(), summary, items}
 	if err := workspace.WriteJSONAtomic(filepath.Join(s.dir, "context.json"), ctx); err != nil {
 		return err

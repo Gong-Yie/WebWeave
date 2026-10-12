@@ -47,8 +47,10 @@ func (e *Executor) readFile(id string, args Args) (any, error) {
 		parts := strings.Split(filepath.ToSlash(raw), "/")
 		if len(parts) > 1 && (parts[0] == "resources" || parts[0] == "result" || parts[0] == "download") {
 			path = filepath.Join(e.runRoot(parts[0], id), filepath.FromSlash(strings.Join(parts[1:], "/")))
-		} else {
+		} else if parts[0] == "data" {
 			path = filepath.Join(e.root, raw)
+		} else {
+			path = filepath.Join(e.runRoot("result", id), raw)
 		}
 	}
 	path, err := workspace.CanonicalPath(path)

@@ -172,6 +172,7 @@ func agentInstructions(agent AgentConfig, cfg RuntimeConfig, id string) string {
 	instructions := strings.NewReplacer("{run_id}", id, "{timeout_default}", fmt.Sprintf("%g", cfg.ToolTimeout.DefaultSeconds), "{timeout_max}", fmt.Sprintf("%g", cfg.ToolTimeout.MaxSeconds)).Replace(systemPrompt)
 	instructions += "\n\n当前 Agent：" + agent.Name + "（ID：" + agent.ID + "）\n角色指令：\n" + agent.Prompt
 	if agent.ID == "main" {
+		instructions += "\n协作要求：设计委派只要求必要的视觉方向和页面结构，不要求长篇规范或坐标级 SVG 蓝图。优先一次编程委派完成可用首版并启动预览；审计只做一次必要检查，只有确认影响使用的缺陷时才追加修复，不为轻微问题反复审计。\n"
 		instructions += "\n可通过 call_agent 调用以下 Agent。它们共享当前运行文件目录，但有独立的任务上下文；务必提供完整任务、必要背景和文件路径。\n"
 		for _, target := range cfg.Agents {
 			if target.ID != "main" {
@@ -179,7 +180,26 @@ func agentInstructions(agent AgentConfig, cfg RuntimeConfig, id string) string {
 			}
 		}
 	}
+	if agent.ID == "design" {
+		instructions += "\n交付要求：除非用户明确要求完整设计文档，否则把方案控制在约 800 字，提供可直接实现的布局、色板和交互要点，不生成上千行规范。不为常规配色、字体栈和缓动曲线搜索网页；外部搜索失败后继续完成方案。\n"
+	}
+	if agent.ID == "audit" {
+		instructions += "\n审计要求：只检查核心功能、明显运行错误和安全边界；一次检查通过后不重复验证，不安装新测试框架进行额外检查。输出精简的有证据问题清单与结论，不撰写长篇检查过程。\n"
+	}
 	return instructions
+}
+
+func agentRoundLimit(id string) int {
+	switch id {
+	case "design":
+		return 8
+	case "audit":
+		return 12
+	case "main":
+		return 24
+	default:
+		return 48
+	}
 }
 
 func agentTools(agent AgentConfig, cfg RuntimeConfig) []responses.ToolUnionParam {

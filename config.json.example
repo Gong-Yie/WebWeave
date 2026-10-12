@@ -51,7 +51,7 @@
   },
   "context": {
     "enabled": true,
-    "max_input_tokens": 1000000,
+    "max_input_tokens": 65536,
     "compression_trigger_ratio": 0.8,
     "keep_recent_items": 12,
     "summary_max_tokens": 2000,
