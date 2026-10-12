@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="WebWeave 本地 Agent 工作台" />
-    <title>WebWeave 工作台</title>
+    <title>WebWeave 控制台</title>
     <link rel="stylesheet" href="/styles.css" />
     <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   </head>
@@ -21,11 +21,16 @@
           </button>
         </div>
 
-        <nav class="primary-nav">
-          <button class="nav-item is-active" data-view="home" type="button"><i data-lucide="house"></i><span>主页</span></button>
-          <button class="nav-item" data-view="workspace" type="button"><i data-lucide="play"></i><span>开始工作</span></button>
-          <button class="nav-item" data-view="skills" type="button"><i data-lucide="sparkles"></i><span>Skills</span></button>
-          <button class="nav-item" data-view="settings" type="button"><i data-lucide="settings-2"></i><span>设置</span></button>
+        <nav class="primary-nav" aria-label="控制台导航">
+          <span class="nav-group-label">工作空间</span>
+          <button class="nav-item is-active" data-view="home" type="button" title="仪表盘" aria-current="page"><i data-lucide="layout-dashboard"></i><span>仪表盘</span></button>
+          <button class="nav-item" data-view="workspace" type="button" title="工作台"><i data-lucide="panels-top-left"></i><span>工作台</span></button>
+          <button class="nav-item" data-view="skills" type="button" title="Skills"><i data-lucide="blocks"></i><span>Skills</span></button>
+          <button class="nav-item" data-view="agents" type="button" title="Agent 管理"><i data-lucide="users-round"></i><span>Agent 管理</span></button>
+          <span class="nav-group-label">配置管理</span>
+          <button class="nav-item" data-view="settings" data-settings-page="config" type="button" title="运行配置"><i data-lucide="sliders-horizontal"></i><span>运行配置</span></button>
+          <button class="nav-item" data-view="settings" data-settings-page="llm" type="button" title="模型配置"><i data-lucide="bot"></i><span>模型配置</span></button>
+          <button class="nav-item" data-view="settings" data-settings-page="style" type="button" title="外观设置"><i data-lucide="palette"></i><span>外观设置</span></button>
         </nav>
 
         <section class="conversation-history" aria-label="对话历史">
@@ -43,12 +48,38 @@
       </aside>
 
       <main class="main-stage">
-        <section id="home-view" class="view home-view is-active" aria-label="主页">
+        <header class="console-header">
+          <div class="console-breadcrumb"><span>控制台</span><i data-lucide="chevron-right"></i><strong id="console-page-title">仪表盘</strong></div>
+          <span class="local-badge"><i data-lucide="hard-drive"></i>本地工作空间</span>
+        </header>
+        <section id="home-view" class="view home-view is-active" aria-label="仪表盘">
           <header class="home-header">
-            <div><span class="eyebrow">WebWeave</span><h1>今天准备构建什么？</h1><p>开始新的网页任务，或继续已有对话。</p></div>
+            <div><span class="eyebrow">工作空间概览</span><h1>仪表盘</h1><p>查看任务运行状态，继续构建或管理配置。</p></div>
             <button id="home-new-run" class="button button-primary" type="button"><i data-lucide="square-pen"></i>新建对话</button>
           </header>
           <div class="home-content">
+            <section class="dashboard-stats" aria-label="任务统计">
+              <article class="stat-card"><span><i data-lucide="messages-square"></i>全部对话</span><strong id="dashboard-total">—</strong><small>当前工作空间的任务</small></article>
+              <article class="stat-card"><span><i data-lucide="loader-circle"></i>正在执行</span><strong id="dashboard-running">—</strong><small>执行中与正在停止的任务</small></article>
+              <article class="stat-card"><span><i data-lucide="circle-check"></i>已完成</span><strong id="dashboard-completed">—</strong><small>已完成生成的任务</small></article>
+              <article class="stat-card"><span><i data-lucide="circle-alert"></i>执行失败</span><strong id="dashboard-failed">—</strong><small>可打开对话查看详情</small></article>
+            </section>
+            <div class="dashboard-columns">
+              <section class="dashboard-card status-overview">
+                <header><h2>任务状态分布</h2><span>全部对话</span></header>
+                <div id="dashboard-status-bar" class="status-bar" aria-label="任务状态分布"></div>
+                <div id="dashboard-status-list" class="status-list"><p class="dashboard-placeholder">正在读取任务状态…</p></div>
+              </section>
+              <section class="dashboard-card config-overview">
+                <header><h2>当前配置</h2><button class="text-button" data-open-view="settings" data-settings-page="llm" type="button">管理配置<i data-lucide="arrow-up-right"></i></button></header>
+                <dl class="config-summary">
+                  <div><dt>主模型</dt><dd id="dashboard-model">—</dd></div>
+                  <div><dt>已启用工具</dt><dd id="dashboard-tools">—</dd></div>
+                  <div><dt>可用 Skills</dt><dd id="dashboard-skills">—</dd></div>
+                  <div><dt>上下文压缩</dt><dd id="dashboard-context">—</dd></div>
+                </dl>
+              </section>
+            </div>
             <section class="home-start">
               <button id="home-start-button" type="button">
                 <span class="home-start-icon"><i data-lucide="wand-sparkles"></i></span>
@@ -56,8 +87,9 @@
                 <i data-lucide="arrow-right"></i>
               </button>
             </section>
-            <section class="recent-runs">
+            <section class="recent-runs dashboard-card">
               <header><h2>最近工作</h2><span id="recent-count">0 个对话</span></header>
+              <div class="recent-table-heading" aria-hidden="true"><span>任务</span><span>状态</span><span>最近更新</span><span></span></div>
               <div id="recent-run-list" class="recent-run-list"></div>
             </section>
           </div>
@@ -84,6 +116,10 @@
                       <input id="file-input" type="file" multiple hidden />
                       <button id="attach-button" class="icon-button composer-icon" type="button" title="上传附件" aria-label="上传附件"><i data-lucide="paperclip"></i></button>
                       <span class="composer-hint">附件</span>
+                      <div class="select-wrap agent-select-wrap">
+                        <select id="agent-select" aria-label="选择执行任务的 Agent" disabled><option value="main">主Agent</option></select>
+                        <i data-lucide="chevron-down"></i>
+                      </div>
                     </div>
                     <button id="primary-action" class="send-button" type="button"><span>发送</span><i data-lucide="arrow-up"></i></button>
                   </div>
@@ -177,7 +213,7 @@
 
         <section id="skills-view" class="view skills-view" aria-label="Skills">
           <header class="skills-header">
-            <div><span class="eyebrow">data/skills</span><h1>Skills</h1><p>查看当前工作台可用的本地能力。</p></div>
+            <div><span class="eyebrow">能力管理</span><h1>Skills</h1><p>查看当前工作台可用的本地能力。</p></div>
           </header>
           <div class="skills-content">
             <div id="skills-list" class="skills-list"></div>
@@ -185,16 +221,31 @@
           </div>
         </section>
 
+        <section id="agents-view" class="view skills-view agents-view" aria-label="Agent 管理">
+          <header class="skills-header agents-header">
+            <div><span class="eyebrow">团队协作</span><h1>Agent 管理</h1><p>主 Agent 协调团队，专业 Agent 各司其职。所有 Agent 使用当前主模型。</p></div>
+            <button id="agent-add" class="button button-primary" type="button" disabled><i data-lucide="plus"></i>添加 Agent</button>
+          </header>
+          <div class="skills-content agents-content">
+            <div id="agents-list" class="agents-list"><p class="dashboard-placeholder">正在读取 Agent…</p></div>
+            <form id="agent-form" class="agent-editor" hidden>
+              <header><h2 id="agent-editor-title">添加 Agent</h2><button id="agent-editor-close" class="icon-button subtle" type="button" aria-label="关闭 Agent 编辑"><i data-lucide="x"></i></button></header>
+              <div class="llm-fields">
+                <label><span>名称</span><input id="agent-name" type="text" required placeholder="例如：内容策划 Agent" /></label>
+                <label><span>职责描述</span><input id="agent-description" type="text" placeholder="简述这个 Agent 负责的工作" /></label>
+                <label><span>角色指令</span><textarea id="agent-prompt" rows="10" required placeholder="定义角色、工作方法、任务边界和交付要求"></textarea></label>
+              </div>
+              <p class="agent-editor-hint">保存后可在工作台选择，主 Agent 也可调用。</p>
+              <button id="agent-save" class="button button-primary" type="submit"><i data-lucide="save"></i>保存 Agent</button>
+            </form>
+          </div>
+        </section>
+
         <section id="settings-view" class="view settings-view" aria-label="设置">
           <header class="settings-header">
-            <div><span id="settings-eyebrow" class="eyebrow">config.json</span><h1 id="settings-title">配置</h1><p id="settings-description">保存后由 Agent 热加载。</p></div>
-            <div class="settings-actions"><span id="settings-state" class="unsaved-state"><span></span>配置已同步</span><button id="settings-save" class="button button-primary" type="button"><i data-lucide="save"></i>保存</button></div>
+            <div><span id="settings-eyebrow" class="eyebrow">配置管理</span><h1 id="settings-title">运行配置</h1><p id="settings-description">管理工具调用、超时与上下文压缩，保存后自动热加载。</p></div>
+            <div class="settings-actions"><span id="settings-state" class="unsaved-state"><span></span>配置已同步</span><button id="settings-save" class="button button-primary" type="button"><i data-lucide="save"></i>保存配置</button></div>
           </header>
-          <nav class="settings-tabs" aria-label="设置分类">
-            <button class="settings-tab is-active" data-settings-page="config" type="button"><i data-lucide="sliders-horizontal"></i><span>配置</span></button>
-            <button class="settings-tab" data-settings-page="llm" type="button"><i data-lucide="bot"></i><span>大模型</span></button>
-            <button class="settings-tab" data-settings-page="style" type="button"><i data-lucide="palette"></i><span>样式</span></button>
-          </nav>
           <div id="settings-config-page" class="settings-page is-active">
             <div class="settings-content">
               <section class="settings-section">

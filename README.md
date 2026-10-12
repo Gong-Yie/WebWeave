@@ -2,8 +2,8 @@
 
 > **WebWeave** - 让网页生成变得简单高效！
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![OpenAI SDK](https://img.shields.io/badge/OpenAI%20SDK-Responses%20API-412991?logo=openai&logoColor=white)](https://github.com/openai/openai-python)
+[![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![OpenAI SDK](https://img.shields.io/badge/OpenAI%20Go%20SDK-Responses%20API-412991?logo=openai&logoColor=white)](https://developers.openai.com/api/reference/go)
 [![License](https://img.shields.io/badge/License-Apache%202.0-D22128)](LICENSE)
 
 ## 项目简介
@@ -16,13 +16,13 @@ WebWeave 采用 OpenAI 兼容的 Responses API。它适合快速生成网页原�
 
 | 层次 | 技术 | 用途 |
 | --- | --- | --- |
-| 运行时 | Python 3.10+ | Agent、WebUI 服务和工具执行 |
-| 大模型 | OpenAI Python SDK、Responses API | 主模型推理、流式输出和工具调用 |
+| 运行时 | Go 1.26+ | Agent、WebUI 服务和工具执行 |
+| 大模型 | 官方 OpenAI Go SDK v3、Responses API | 主模型推理、流式输出和工具调用 |
 | 兼容服务 | OpenAI 兼容接口 | 可连接 DeepSeek 或其他兼容服务 |
-| 后端 | Python 标准库 `http.server`、`ThreadingHTTPServer` | 本地 HTTP API、静态文件服务和预览代理 |
+| 后端 | Go 标准库 `net/http`、`httputil.ReverseProxy` | 本地 HTTP API、静态文件服务和 HTTP/WebSocket 预览代理 |
 | 前端 | HTML、CSS、原生 JavaScript | 无构建步骤的工作台界面 |
 | 图标 | Lucide | 导航、工具栏和状态图标 |
-| Skill | YAML front matter、PyYAML | Skill 发现、校验和读取 |
+| Skill | YAML front matter、`go.yaml.in/yaml/v3` | Skill 发现、校验和读取 |
 | 持久化 | JSON、JSONL、本地文件目录 | 配置、运行状态、事件、上下文和生成结果 |
 
 ## 效果展示
@@ -33,9 +33,9 @@ WebWeave 采用 OpenAI 兼容的 Responses API。它适合快速生成网页原�
 
 ![WebWeave 完整工作台](assert/效果展示.png)
 
-### 主页与任务入口
+### 控制台与任务入口
 
-主页提供新建对话和最近工作入口，历史对话可以从左侧导航继续打开或删除。
+控制台采用左侧导航、右侧内容的布局。仪表盘展示全部对话、执行中、已完成和失败任务的实时统计、任务状态分布，以及当前模型、工具和 Skills 概览，并提供新建对话和最近工作入口。历史对话可以从左侧导航继续打开或删除。
 
 ![WebWeave 主页](assert/主页展示.png)
 
@@ -61,29 +61,32 @@ WebWeave 采用 OpenAI 兼容的 Responses API。它适合快速生成网页原�
 
 ```text
 WebWeave/
-├── core/                         # Agent、配置、运行状态和 WebUI 后端
-│   ├── agent.py                  # Responses API Agent 循环
-│   ├── config.py                 # config.json 热加载和配置校验
-│   ├── context.py                # 上下文压缩和保留策略
-│   ├── instance.py               # Web 实例进程与健康检查
-│   ├── paths.py                  # 运行目录和路径边界
-│   ├── preview.py                # 实例预览代理和检查桥接
-│   ├── prompt.py                 # Agent 系统提示词
-│   ├── run_store.py              # 运行状态、事件和上下文存储
-│   ├── vision.py                 # 图片转文字和视觉模型适配
-│   ├── web.py                    # WebUI 服务和本地 API
-│   ├── web_jobs.py               # 后台任务、停止和继续
-│   └── __main__.py               # python -m core 入口
-├── tools/                        # 可热加载的 Agent 工具
-│   ├── file_generation.py        # 在结果目录生成文件
-│   ├── file_read.py              # 读取运行范围内的文件
-│   ├── registry.py               # 工具发现、校验和热加载
-│   ├── skill_discovery.py        # Skill 列表和内容读取
-│   ├── terminal.py               # 运行范围内的 PowerShell 命令
-│   ├── web_instance.py           # Web 实例生命周期管理
-│   └── web_search.py              # 搜索和下载网页资料
-├── skills/                       # Skill 加载器代码
-│   └── loader.py
+├── main.go                       # WebUI 与命令行启动入口
+├── core/                         # Agent 与应用核心
+│   ├── app.go                    # 后台任务、停止和继续
+│   ├── agent.go                  # Responses Agent、视觉模型、上下文压缩
+│   ├── config.go                 # config.json 热加载、校验及密钥掩码
+│   ├── http.go                   # 前端 API、上传、文件预览和背景图
+│   ├── instance.go               # Web 实例生命周期与健康检查
+│   ├── paths.go                  # 当前应用的运行目录入口
+│   ├── preview.go                # HTTP/WebSocket 预览代理
+│   ├── preview_bridge.js         # 组件选择与定点评价桥接
+│   ├── preview_bridge.css        # 预览检查样式
+│   ├── store.go                  # JSON/JSONL 状态、事件与上下文
+│   ├── tools.go                  # 将当前配置交给工具执行器
+│   ├── cli.go                    # 命令行对话
+│   └── webweave_test.go           # 隔离目录与本地假服务行为测试
+├── tools/                        # Agent 工具模块
+│   ├── registry.go               # 工具定义、参数、启用状态与超时分发
+│   ├── files.go                  # 当前运行内的文件读写
+│   ├── search.go                 # 网页检索与文件下载
+│   ├── terminal.go               # 终端工具的前台与后台执行
+│   ├── process*.go               # PowerShell 与跨平台进程树管理
+│   └── *_test.go                 # 文件隔离、检索下载与终端测试
+├── skills/
+│   └── loader.go                 # YAML Skill 发现、校验与读取
+├── workspace/
+│   └── paths.go                  # 共享路径边界、运行目录与原子写入
 ├── webui/                        # 原生 HTML/CSS/JavaScript 工作台
 │   ├── index.html
 │   ├── app.js
@@ -98,7 +101,8 @@ WebWeave/
 ├── assert/                       # README 效果截图
 ├── config.json                   # 本地运行配置
 ├── config.json.example           # 配置模板
-├── requirements.txt              # Python 依赖
+├── go.mod                        # Go 模块及依赖版本
+├── go.sum                        # Go 依赖校验
 ├── LICENSE                       # Apache 2.0 许可证
 └── README.md
 ```
@@ -109,6 +113,10 @@ WebWeave/
 
 Agent 使用 ReAct 循环理解需求，并按需调用工具完成任务。每轮模型响应都可以继续读取工具结果，直到生成结果或向用户询问必要信息。
 
+系统默认提供主Agent、网站灵感设计Agent、代码编程Agent和代码审计Agent。在左侧“Agent 管理”中可编辑角色指令、添加自定义 Agent 和删除自定义 Agent。所有 Agent 共用 `llm.main` 模型配置；定义保存在 `config.json` 的 `agents` 数组，旧配置未包含该字段时自动提供四个默认 Agent。
+
+工作台输入框下方的下拉框默认选择主Agent，可以切换本次任务的执行 Agent。重新打开对话会恢复上次执行的 Agent，停止后继续也会保留选择。主 Agent 可通过 `call_agent` 调用所有专业及自定义 Agent；委派任务共享当前运行的文件目录，使用独立上下文，结果返回主 Agent 后由它继续处理。对话与工具记录显示实际执行的 Agent。默认 Agent 可以编辑，不能删除。
+
 当前内置工具包括：
 
 - `list_skills`、`read_skill`：发现并读取本地 Skill
@@ -117,7 +125,7 @@ Agent 使用 ReAct 循环理解需求，并按需调用工具完成任务。每�
 - `terminal_run`：在当前运行目录执行 PowerShell 命令
 - `web_instance`：启动、查看、停止和重启生成的网页实例
 
-工具可以在 `config.json` 中独立启用、禁用和设置是否接收当前运行 ID。
+工具可以在 `config.json` 中独立启用、禁用和设置运行隔离。文件、下载、终端和实例工具需要启用 `run_scoped` 才能访问当前运行目录。搜索与下载直接使用 Go HTTP 客户端，无需安装 curl。
 
 ### 2. 对话运行隔离
 
@@ -126,7 +134,7 @@ Agent 使用 ReAct 循环理解需求，并按需调用工具完成任务。每�
 - 流式显示模型输出
 - 协作式停止和停止后继续
 - 历史记录重新打开
-- 对话记录和关联运行文件删除
+- 对话记录删除（保留附件、下载及生成文件，与原后端行为一致）
 - 运行事件和工具调用追踪
 
 ### 3. 可选视觉模型
@@ -152,7 +160,7 @@ Agent 生成网页后，可以通过实例面板直接查看本地预览。检�
 
 ### 6. 设置、主题和 Skill 管理
 
-WebUI 设置页分为配置、大模型和样式三个子页面：
+左侧导航提供运行配置、模型配置和外观设置三个独立入口：
 
 - 运行时模型、工具、超时和上下文压缩配置
 - 主模型和可选视觉模型配置
@@ -164,15 +172,23 @@ WebUI 设置页分为配置、大模型和样式三个子页面：
 
 ### 7. 上下文压缩与热加载
 
-上下文达到 `config.json` 中的阈值后，Agent 会生成摘要并保留最近项目，降低长对话的输入成本。配置文件和工具模块支持运行时重新加载，修改后下一次请求即可使用新配置。
+上下文达到 `config.json` 中的阈值后，Agent 会生成摘要并保留最近项目，降低长对话的输入成本。配置文件与 `data/skills` 中的 SKILL 文件支持运行时重新读取。工具定义和分发位于 `tools/registry.go`，文件、搜索与终端实现分别位于对应模块文件；修改 Go 源码后需要重新编译或重新执行 `go run`。
+
+代码依赖方向为 `main → core → tools / skills / workspace`，`tools` 依赖 `skills` 和 `workspace`，`skills` 依赖 `workspace`。工具通过应用注入的回调执行实例操作，不导入 `core`，避免循环依赖。`skills/` 保存加载器源码，`data/skills/` 保存用户的 SKILL 文档。
+
+### 8. 从 Python 后端迁移
+
+后端不再需要 Python。已有 `config.json`、`data/run/{运行ID}/state.json`、`events.jsonl`、`context.json` 和资源目录可继续使用，前端 API 路径保持一致。停止旧 Python 服务后再启动 Go 服务，以避免端口占用和两个进程同时修改运行数据。
+
+旧对话恢复时会移除未配对的工具调用与结果。已经退出的历史实例需要重新启动；如果原启动命令本身使用 Python，则该生成项目仍需要 Python，这与 WebWeave 后端运行时无关。
 
 ## 安装指南
 
 ### 环境要求
 
-- Python 3.10 或更高版本
+- Go 1.26 或更高版本
 - 一个 OpenAI 兼容的大模型服务和 API Key
-- Windows、Linux 或 macOS
+- Windows、Linux 或 macOS；终端工具和实例启动需要 PowerShell（Windows 内置 PowerShell 或安装 `pwsh`）
 
 ### 1. 获取项目
 
@@ -181,30 +197,13 @@ git clone https://github.com/Gong-Yie/WebWeave.git
 cd WebWeave
 ```
 
-### 2. 创建虚拟环境
-
-Windows PowerShell：
+### 2. 下载依赖
 
 ```powershell
-py -3.10 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+go mod download
 ```
 
-Linux 或 macOS：
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-### 3. 安装依赖
-
-```bash
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-### 4. 配置大模型
+### 3. 配置大模型
 
 首次安装且项目根目录没有 `config.json` 时，可以复制配置模板：
 
@@ -238,11 +237,11 @@ Copy-Item config.json.example config.json
 
 - `model.stream`：是否流式输出
 - `tools.<name>.enabled`：是否向模型暴露工具
-- `tools.<name>.run_scoped`：是否传入当前运行 ID
+- `tools.<name>.run_scoped`：是否允许工具访问当前运行的隔离目录
 - `tool_timeout`：工具默认和最大超时
 - `context`：上下文压缩开关、阈值和保留项目数
 
-也可以直接在 WebUI 的“设置 → 大模型”和“设置 → 配置”页面修改，配置会被校验并原子写入。
+也可以直接在 WebUI 左侧的“模型配置”和“运行配置”页面修改，配置会被校验并原子写入。
 
 模型连接遇到超时、连接中断、限流或服务端错误时会自动重试，最多 5 次；请求参数错误不会重试。
 
@@ -252,8 +251,8 @@ WebUI 设置页不内置模型、超时或工具开关的运行参数；配置�
 
 ### 1. 启动 WebUI
 
-```bash
-python -m core
+```powershell
+go run .
 ```
 
 默认地址为：
@@ -262,15 +261,31 @@ python -m core
 
 自定义端口：
 
-```bash
-python -m core --host 127.0.0.1 --port 8765
+```powershell
+go run . --host 127.0.0.1 --port 8765
 ```
 
 服务默认只监听本机地址，适合本地使用。启动后在浏览器打开地址即可进入 WebWeave 工作台。
 
+也可以构建后启动（Windows PowerShell）：
+
+```powershell
+go build -o webweave.exe .
+.\webweave.exe
+```
+
+从其他目录运行时，使用 `--root` 指定包含 `webui`、`config.json` 和 `data` 的项目根目录。Linux/macOS 构建时可使用 `go build -o webweave .`。
+
+命令行对话及恢复已有对话：
+
+```powershell
+go run . --cli
+go run . --cli --run-id 现有运行ID
+```
+
 ### 2. 完成一次网页任务
 
-1. 点击“新建对话”或左侧“开始工作”。
+1. 点击“新建对话”或左侧“工作台”。
 2. 描述网页目标、页面结构、视觉风格和交互要求。
 3. 通过附件按钮上传参考图、需求文档或其他资源。
 4. 观察对话区和执行检查区中的工具调用过程。
@@ -301,7 +316,7 @@ description: 描述这个 Skill 解决什么问题。
 
 ### 4. 管理主题和背景图
 
-进入“设置 → 样式”选择主题或上传 PNG、JPG、WebP 背景图。背景图会保存到 `data/background`，删除背景不会影响对话和生成结果。
+进入左侧“外观设置”选择主题或上传 PNG、JPG、WebP 背景图。背景图会保存到 `data/background`，删除背景不会影响对话和生成结果。
 
 ### 5. 本地 API
 
@@ -312,8 +327,12 @@ WebUI 同时提供用于前端和自动化集成的本地 API：
 | `GET` | `/api/health` | 检查服务状态 |
 | `GET` / `PUT` | `/api/config` | 读取或保存运行配置 |
 | `GET` | `/api/skills` | 获取本地 Skill 列表 |
+| `GET` / `POST` | `/api/agents` | 列出 Agent 或添加自定义 Agent |
+| `PUT` / `DELETE` | `/api/agents/{agent_id}` | 编辑 Agent 或删除自定义 Agent |
 | `GET` / `POST` | `/api/runs` | 列出或创建对话 |
-| `DELETE` | `/api/runs/{run_id}` | 删除对话及其运行目录 |
+| `DELETE` | `/api/runs/{run_id}` | 删除对话记录，保留资源与生成文件 |
+
+`POST /api/runs/{run_id}/messages` 支持 `agent_id`，省略时使用主Agent。`POST /api/runs/{run_id}/continue` 可传入 `agent_id` 切换执行者，空请求体则沿用对话中保存的 Agent。
 
 ## 贡献指南
 
@@ -326,12 +345,13 @@ WebUI 同时提供用于前端和自动化集成的本地 API：
 5. 提交前运行最小必要检查：
 
    ```powershell
-   python -B -m py_compile core\web.py core\config.py
-   node --check webui\app.js
+   go test ./...
    ```
 
 6. 不要提交真实 API Key、运行生成物、个人背景图或临时调试文件。
 7. Pull Request 中请说明改动范围、验证命令和已知限制。
+
+测试使用系统临时目录和本地假模型 HTTP 服务，不连接真实模型提供商。实例生命周期测试会通过 PowerShell 启动并清理本地测试服务。前端代码修改时另行执行 `node --check webui/app.js`。
 
 ## 许可证
 

@@ -21,8 +21,12 @@ const state = {
   inspectMode: "preview",
   config: null,
   configReady: false,
+  settingsPage: "config",
   skills: [],
   skillErrors: [],
+  agents: [],
+  selectedAgentId: "main",
+  editingAgentId: null,
   appearance: {
     theme: localStorage.getItem("webweave-theme") || "system",
     backgroundUrl: "",
@@ -97,24 +101,35 @@ function setConnection(connected) {
 
 function switchView(viewName) {
   document.querySelectorAll(".nav-item").forEach((item) => {
-    item.classList.toggle("is-active", item.dataset.view === viewName);
+    const active =
+      item.dataset.view === viewName &&
+      (viewName !== "settings" || item.dataset.settingsPage === state.settingsPage);
+    item.classList.toggle("is-active", active);
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
   });
   document.querySelectorAll(".view").forEach((view) => {
     view.classList.toggle("is-active", view.id === `${viewName}-view`);
   });
+  $("#console-page-title").textContent =
+    viewName === "settings"
+      ? $("#settings-title").textContent
+      : { home: "仪表盘", workspace: "工作台", skills: "Skills", agents: "Agent 管理" }[viewName];
+  const settingsHash = state.settingsPage === "config"
+    ? "settings"
+    : `settings/${state.settingsPage}`;
+  window.location.hash = viewName === "settings" ? settingsHash : viewName;
 }
 
 function switchSettingsPage(pageName) {
   const isStyle = pageName === "style";
   const pageMeta = {
-    config: ["config.json", "配置", "保存后由 Agent 热加载。"],
-    llm: ["llm", "大模型", "配置主模型和可选的视觉模型。"],
-    style: ["appearance", "样式", "主题与背景更改会自动保存。"],
+    config: ["配置管理", "运行配置", "管理工具调用、超时与上下文压缩，保存后自动热加载。"],
+    llm: ["配置管理", "模型配置", "配置主模型和可选的视觉模型。"],
+    style: ["配置管理", "外观设置", "主题与背景更改会自动保存。"],
   };
+  state.settingsPage = pageName;
   const [eyebrow, title, description] = pageMeta[pageName] || pageMeta.config;
-  document.querySelectorAll(".settings-tab").forEach((tab) => {
-    tab.classList.toggle("is-active", tab.dataset.settingsPage === pageName);
-  });
   document.querySelectorAll(".settings-page").forEach((page) => {
     page.classList.toggle("is-active", page.id === `settings-${pageName}-page`);
   });
@@ -122,7 +137,7 @@ function switchSettingsPage(pageName) {
   $("#settings-title").textContent = title;
   $("#settings-description").textContent = description;
   $(".settings-actions").hidden = isStyle;
-  window.location.hash = pageName === "config" ? "settings" : `settings/${pageName}`;
+  switchView("settings");
 }
 
 function resolvedTheme() {
@@ -206,6 +221,7 @@ function applySidebarState() {
   );
   sidebarToggle.title = label;
   sidebarToggle.setAttribute("aria-label", label);
+  sidebarToggle.setAttribute("aria-expanded", String(!state.sidebarCollapsed));
   localStorage.setItem(
     "webweave-sidebar-collapsed",
     String(state.sidebarCollapsed),
@@ -275,10 +291,11 @@ function renderRuns() {
   history.replaceChildren();
   recent.replaceChildren();
   $("#recent-count").textContent = `${state.runs.length} 个对话`;
+  renderDashboardRuns();
 
   if (!state.runs.length) {
     history.append(element("div", "empty-list", "暂无对话"));
-    recent.append(element("div", "empty-panel", "暂无最近工作"));
+    recent.append(element("div", "empty-panel", "还没有任务，点击“新建对话”开始构建网页。"));
     return;
   }
 
@@ -318,12 +335,13 @@ function renderRuns() {
         element(
           "small",
           "",
-          `${run.run_id} · ${statusLabel(run.status)}`,
+          run.run_id,
         ),
       );
       recentItem.append(
         mark,
         copy,
+        element("span", `recent-status status-${run.status}`, statusLabel(run.status)),
         element("time", "", formatTime(run.updated_at)),
         icon("chevron-right"),
       );
@@ -334,6 +352,43 @@ function renderRuns() {
   refreshIcons();
 }
 
+function renderDashboardRuns() {
+  const groups = [
+    { label: "正在执行", tone: "running", statuses: ["running", "stopping"] },
+    { label: "已完成", tone: "completed", statuses: ["completed"] },
+    { label: "执行失败", tone: "failed", statuses: ["failed"] },
+    { label: "等待 / 已停止", tone: "waiting", statuses: ["waiting", "stopped"] },
+  ];
+  const counts = groups.map((group) =>
+    state.runs.filter((run) => group.statuses.includes(run.status)).length,
+  );
+  $("#dashboard-total").textContent = state.runs.length;
+  ["running", "completed", "failed"].forEach((name, index) => {
+    $(`#dashboard-${name}`).textContent = counts[index];
+  });
+  const bar = $("#dashboard-status-bar");
+  const list = $("#dashboard-status-list");
+  bar.replaceChildren();
+  list.replaceChildren();
+  groups.forEach((group, index) => {
+    const count = counts[index];
+    if (count) {
+      const segment = element("span", `status-segment status-${group.tone}`);
+      segment.style.width = `${(count / state.runs.length) * 100}%`;
+      segment.title = `${group.label}：${count}`;
+      bar.append(segment);
+    }
+    const row = element("div");
+    const label = element("span");
+    label.append(
+      element("i", `status-dot status-${group.tone}`),
+      document.createTextNode(group.label),
+    );
+    row.append(label, element("strong", "", String(count)));
+    list.append(row);
+  });
+}
+
 async function loadRuns() {
   const payload = await api("/api/runs");
   state.runs = payload.runs;
@@ -341,6 +396,7 @@ async function loadRuns() {
 }
 
 function renderSkills() {
+  $("#dashboard-skills").textContent = state.skills.length;
   const list = $("#skills-list");
   const errors = $("#skills-errors");
   list.replaceChildren();
@@ -412,6 +468,8 @@ async function activateRun(runId) {
   renderRuns();
   switchView("workspace");
   await loadActiveRun(true);
+  state.selectedAgentId = state.activeRun?.state?.agent_id || "main";
+  renderAgentSelector();
 }
 
 async function loadActiveRun(force = false) {
@@ -471,13 +529,15 @@ function renderConversation(run) {
     toolEvents = [];
   };
   let streamedText = "";
+  let streamedAgent = "WebWeave";
+  let streamedDelegated = false;
 
   const flushStreamedText = () => {
     if (!streamedText.trim()) {
       streamedText = "";
       return;
     }
-    container.append(createAgentMessage(streamedText));
+    container.append(createAgentMessage(streamedText, streamedAgent, streamedDelegated));
     streamedText = "";
   };
 
@@ -495,6 +555,10 @@ function renderConversation(run) {
     }
     if (event.type === "model_output_delta") {
       flushTools();
+      const agentName = event.payload?.agent_name || "WebWeave";
+      if (agentName !== streamedAgent) flushStreamedText();
+      streamedAgent = agentName;
+      streamedDelegated = Boolean(event.payload?.delegated);
       const delta = event.payload?.delta;
       if (typeof delta === "string") streamedText += delta;
       return;
@@ -505,6 +569,8 @@ function renderConversation(run) {
       if (typeof text === "string" && text.trim()) {
         streamedText = text;
       }
+      streamedAgent = event.payload?.agent_name || "WebWeave";
+      streamedDelegated = Boolean(event.payload?.delegated);
       flushStreamedText();
     }
   });
@@ -542,11 +608,11 @@ function createUserMessage(payload) {
   return article;
 }
 
-function createAgentMessage(text) {
+function createAgentMessage(text, agentName = "WebWeave", delegated = false) {
   const article = element("article", "message message-agent");
   article.append(element("div", "agent-avatar", "W"));
   const content = element("div", "message-content");
-  content.append(element("div", "message-author", "WebWeave"));
+  content.append(element("div", "message-author", agentName + (delegated ? " · 委派任务" : "")));
   const body = element("div", "message-body prose");
   text.split(/\n{2,}/).forEach((paragraph) => {
     body.append(element("p", "", paragraph));
@@ -590,7 +656,7 @@ function createToolDetail(event) {
     element(
       "span",
       "",
-      `${event.payload?.tool_name || "tool"}${toolArgumentHint(event.payload)}`,
+      `${event.payload?.agent_name ? event.payload.agent_name + " · " : ""}${event.payload?.tool_name || "tool"}${toolArgumentHint(event.payload)}`,
     ),
   );
   row.append(
@@ -606,7 +672,8 @@ function createToolDetail(event) {
 function toolArgumentHint(payload) {
   try {
     const args = JSON.parse(payload?.arguments || "{}");
-    const hint = args.path || args.file_path || args.action || args.cwd;
+    const target = state.agents.find((agent) => agent.id === args.agent_id);
+    const hint = target?.name || args.agent_id || args.path || args.file_path || args.action || args.cwd;
     return hint ? ` · ${String(hint).slice(0, 80)}` : "";
   } catch {
     return "";
@@ -637,7 +704,7 @@ function renderActivity(run) {
     const copy = element("span");
     copy.append(
       element("strong", "", event.payload?.tool_name || "tool"),
-      element("small", "", toolArgumentHint(event.payload).replace(/^ · /, "") || "完成"),
+      element("small", "", [event.payload?.agent_name, toolArgumentHint(event.payload).replace(/^ · /, "")].filter(Boolean).join(" · ") || "完成"),
     );
     row.append(
       toolState,
@@ -665,6 +732,7 @@ function updateActionFromRun(run) {
 
 function updateAction(action, status = null) {
   state.action = action;
+  $("#agent-select").disabled = action === "running" || !state.agents.length;
   primaryAction.classList.toggle("is-running", action === "running");
   primaryAction.classList.toggle("is-paused", action === "paused");
   if (action === "running") {
@@ -685,7 +753,10 @@ function updateAction(action, status = null) {
 
 async function handlePrimaryAction() {
   if (!state.activeRunId) {
+    const selectedAgentId = state.selectedAgentId;
     await createRun();
+    state.selectedAgentId = selectedAgentId;
+    renderAgentSelector();
   }
   if (state.action === "running") {
     await api(`/api/runs/${encodeURIComponent(state.activeRunId)}/stop`, {
@@ -698,6 +769,7 @@ async function handlePrimaryAction() {
   if (state.action === "paused" && !promptInput.value.trim()) {
     await api(`/api/runs/${encodeURIComponent(state.activeRunId)}/continue`, {
       method: "POST",
+      body: JSON.stringify({ agent_id: state.selectedAgentId }),
     });
     showToast("已继续运行");
     await loadActiveRun(true);
@@ -724,6 +796,7 @@ async function handlePrimaryAction() {
       method: "POST",
       body: JSON.stringify({
         content,
+        agent_id: state.selectedAgentId,
         attachments: attachmentNames,
         instance_context: state.pendingContexts,
       }),
@@ -982,6 +1055,116 @@ async function loadConfig() {
   setConfigAvailability(true);
 }
 
+function renderAgentSelector() {
+  const select = $("#agent-select");
+  select.replaceChildren();
+  if (!state.agents.length) {
+    const option = element("option", "", "主Agent");
+    option.value = "main";
+    select.append(option);
+  }
+  state.agents.forEach((agent) => {
+    const option = element("option", "", agent.name);
+    option.value = agent.id;
+    select.append(option);
+  });
+  if (!state.agents.some((agent) => agent.id === state.selectedAgentId)) {
+    state.selectedAgentId = "main";
+  }
+  select.value = state.selectedAgentId;
+  select.disabled = state.action === "running" || !state.agents.length;
+}
+
+function renderAgents() {
+  const list = $("#agents-list");
+  list.replaceChildren();
+  if (!state.agents.length) {
+    list.append(element("div", "empty-panel", "当前服务尚未支持 Agent 管理，请更新并重启服务。"));
+  }
+  state.agents.forEach((agent) => {
+    const builtIn = ["main", "design", "code", "audit"].includes(agent.id);
+    const card = element("article", `agent-card${agent.id === "main" ? " agent-card-main" : ""}`);
+    const heading = element("header");
+    const avatar = element("span", "agent-card-icon");
+    avatar.append(icon({ main: "network", design: "palette", code: "code-2", audit: "shield-check" }[agent.id] || "bot"));
+    const copy = element("div");
+    copy.append(element("h2", "", agent.name), element("span", "agent-card-role", agent.id === "main" ? "默认执行 · 可调用全部 Agent" : builtIn ? "专业 Agent" : "自定义 Agent"));
+    heading.append(avatar, copy);
+    card.append(heading, element("p", "skill-description", agent.description || "未填写职责描述"));
+    const footer = element("footer");
+    const edit = element("button", "text-button", "编辑");
+    edit.type = "button";
+    edit.setAttribute("aria-label", `编辑 ${agent.name}`);
+    edit.addEventListener("click", () => openAgentEditor(agent));
+    footer.append(edit);
+    if (!builtIn) {
+      const remove = element("button", "text-button danger", "删除");
+      remove.type = "button";
+      remove.setAttribute("aria-label", `删除 ${agent.name}`);
+      remove.addEventListener("click", () => runSafely(() => deleteAgent(agent)));
+      footer.append(remove);
+    }
+    card.append(footer);
+    list.append(card);
+  });
+  $("#agent-add").disabled = !state.agents.length;
+  renderAgentSelector();
+  refreshIcons();
+}
+
+function openAgentEditor(agent = null) {
+  state.editingAgentId = agent?.id || null;
+  $("#agent-editor-title").textContent = agent ? "编辑 Agent" : "添加 Agent";
+  $("#agent-name").value = agent?.name || "";
+  $("#agent-description").value = agent?.description || "";
+  $("#agent-prompt").value = agent?.prompt || "";
+  $("#agent-form").hidden = false;
+  $(".agents-content").classList.add("is-editing");
+  $("#agent-name").focus();
+}
+
+function closeAgentEditor() {
+  $("#agent-form").hidden = true;
+  $(".agents-content").classList.remove("is-editing");
+  state.editingAgentId = null;
+}
+
+async function saveAgent() {
+  const button = $("#agent-save");
+  const id = state.editingAgentId;
+  const agent = {
+    name: $("#agent-name").value.trim(),
+    description: $("#agent-description").value.trim(),
+    prompt: $("#agent-prompt").value.trim(),
+  };
+  if (!agent.name || !agent.prompt) {
+    showToast("请填写 Agent 名称和角色指令");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const payload = await api(id ? `/api/agents/${encodeURIComponent(id)}` : "/api/agents", {
+      method: id ? "PUT" : "POST",
+      body: JSON.stringify(agent),
+    });
+    state.agents = payload.agents;
+    closeAgentEditor();
+    renderAgents();
+    showToast(id ? "Agent 已保存" : "Agent 已添加");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function deleteAgent(agent) {
+  if (!window.confirm(`删除「${agent.name}」？已有对话记录和生成文件会保留。`)) return;
+  const payload = await api(`/api/agents/${encodeURIComponent(agent.id)}`, { method: "DELETE" });
+  state.agents = payload.agents;
+  if (state.editingAgentId === agent.id) closeAgentEditor();
+  renderAgents();
+  showToast("Agent 已删除");
+}
+
 function setConfigAvailability(available) {
   state.configReady = available;
   document
@@ -996,6 +1179,13 @@ function setConfigAvailability(available) {
 
 function renderConfig() {
   const config = state.config;
+  // The running binary may predate the Agent API while serving newer UI files.
+  state.agents = config.agents ?? [];
+  renderAgents();
+  $("#dashboard-model").textContent = config.llm?.main?.model || "未配置";
+  const enabledTools = Object.values(config.tools).filter((tool) => tool.enabled).length;
+  $("#dashboard-tools").textContent = `${enabledTools} / ${Object.keys(config.tools).length}`;
+  $("#dashboard-context").textContent = config.context.enabled ? "已启用" : "未启用";
   const tools = $("#settings-tools");
   tools.querySelectorAll(".settings-row:not(.settings-table-head)").forEach((row) => row.remove());
   Object.entries(config.tools).forEach(([name, settings]) => {
@@ -1147,15 +1337,18 @@ async function saveConfig() {
 
 function bindEvents() {
   let wasMobile = window.innerWidth <= 720;
-  document.querySelectorAll(".nav-item").forEach((button) => {
-    button.addEventListener("click", async () => {
-      if (button.dataset.view === "workspace" && !state.activeRunId) {
-        await createRun();
-        return;
-      }
-      if (button.dataset.view === "settings") switchSettingsPage("config");
-      switchView(button.dataset.view);
-    });
+  document.querySelectorAll(".nav-item, [data-open-view]").forEach((button) => {
+    button.addEventListener("click", () =>
+      runSafely(async () => {
+        const view = button.dataset.view || button.dataset.openView;
+        if (view === "workspace" && !state.activeRunId) {
+          await createRun();
+          return;
+        }
+        if (view === "settings") switchSettingsPage(button.dataset.settingsPage);
+        else switchView(view);
+      }),
+    );
   });
   sidebarToggle.addEventListener("click", () => {
     state.sidebarCollapsed = !state.sidebarCollapsed;
@@ -1206,6 +1399,15 @@ function bindEvents() {
     }
   });
   primaryAction.addEventListener("click", () => runSafely(handlePrimaryAction));
+  $("#agent-select").addEventListener("change", (event) => {
+    state.selectedAgentId = event.target.value;
+  });
+  $("#agent-add").addEventListener("click", () => openAgentEditor());
+  $("#agent-editor-close").addEventListener("click", closeAgentEditor);
+  $("#agent-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    runSafely(saveAgent);
+  });
   document.querySelectorAll(".viewport-button").forEach((button) => {
     button.addEventListener("click", () => {
       document.querySelectorAll(".viewport-button").forEach((item) => item.classList.remove("is-active"));
@@ -1232,9 +1434,6 @@ function bindEvents() {
     setVisionFieldsState();
     markConfigDirty();
   });
-  document.querySelectorAll(".settings-tab").forEach((tab) => {
-    tab.addEventListener("click", () => switchSettingsPage(tab.dataset.settingsPage));
-  });
   document.querySelectorAll('input[name="appearance-theme"]').forEach((input) => {
     input.addEventListener("change", () => setTheme(input.value));
   });
@@ -1250,6 +1449,14 @@ function bindEvents() {
   });
   $("#background-remove").addEventListener("click", () => runSafely(removeBackgroundImage));
   window.addEventListener("message", receivePreviewMessage);
+  window.addEventListener("hashchange", () => {
+    const target = window.location.hash.slice(1);
+    if (["settings", "settings/llm", "settings/style"].includes(target)) {
+      switchSettingsPage(target === "settings" ? "config" : target.split("/")[1]);
+    } else if (["home", "workspace", "skills", "agents"].includes(target)) {
+      switchView(target);
+    }
+  });
   window.addEventListener("resize", () => {
     const isMobile = window.innerWidth <= 720;
     if (isMobile && !wasMobile) setInspectorHidden(true);
@@ -1302,7 +1509,8 @@ async function runSafely(operation) {
 
 async function poll() {
   try {
-    if (state.activeRunId) await loadActiveRun();
+    const onDashboard = $("#home-view").classList.contains("is-active");
+    if (state.activeRunId && !onDashboard) await loadActiveRun();
     else await loadRuns();
     setConnection(true);
   } catch (error) {
@@ -1312,6 +1520,7 @@ async function poll() {
 }
 
 async function initialize() {
+  const target = window.location.hash.slice(1);
   applyAppearance();
   bindEvents();
   setConfigAvailability(false);
@@ -1332,12 +1541,10 @@ async function initialize() {
     setConnection(false);
     showToast(error.message || "无法连接本地服务");
   }
-  const target = window.location.hash.slice(1);
-  if (target === "skills") {
-    switchView("skills");
+  if (["skills", "agents"].includes(target)) {
+    switchView(target);
   }
   if (["settings", "settings/llm", "settings/style"].includes(target)) {
-    switchView("settings");
     switchSettingsPage(target === "settings" ? "config" : target.split("/")[1]);
   }
   if (target === "workspace" && state.runs[0]) await activateRun(state.runs[0].run_id);
