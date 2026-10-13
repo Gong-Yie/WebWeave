@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -39,6 +40,7 @@ type App struct {
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	backgroundMu sync.Mutex
+	templateMu   sync.Mutex
 }
 
 func New(root string) (*App, error) {
@@ -99,7 +101,7 @@ func (a *App) Close() {
 	})
 }
 
-func (a *App) startMessage(id, content, agentID string, attachments []string, instanceContext any, resume bool) error {
+func (a *App) startMessage(id, content, agentID string, attachments []string, instanceContext any, resume bool, requestedEffort *string) error {
 	run, err := a.runtime(id)
 	if err != nil {
 		return err
@@ -133,7 +135,28 @@ func (a *App) startMessage(id, content, agentID string, attachments []string, in
 	if err != nil {
 		return err
 	}
+	provider, err := providerForAgent(a.config.get(), agent)
+	if err != nil {
+		return err
+	}
+	state, err := run.store.readState()
+	if err != nil {
+		return err
+	}
+	effort := ""
+	if state.AgentID == agent.ID {
+		effort = state.ReasoningEffort
+	}
+	if requestedEffort != nil {
+		effort = *requestedEffort
+	}
+	if effort != "" && !slices.Contains(provider.ReasoningEfforts, effort) {
+		return apiError{400, "INVALID_REASONING_EFFORT", "当前 Agent 的模型不支持所选思考强度"}
+	}
 	if err = run.store.selectAgent(agent); err != nil {
+		return err
+	}
+	if err = run.store.selectReasoningEffort(effort); err != nil {
 		return err
 	}
 	if err = run.store.start(); err != nil {
@@ -165,6 +188,7 @@ func (a *App) startMessage(id, content, agentID string, attachments []string, in
 		}
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
+	ctx = context.WithValue(ctx, agentExecutionKey{}, agentExecution{effort: effort})
 	job := &runJob{cancel: cancel, done: make(chan struct{})}
 	run.job = job
 	a.wg.Add(1)

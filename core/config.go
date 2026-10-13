@@ -16,9 +16,18 @@ import (
 )
 
 type ProviderConfig struct {
-	Model   string `json:"model"`
-	BaseURL string `json:"base_url"`
-	APIKey  string `json:"api_key"`
+	Model            string            `json:"model"`
+	BaseURL          string            `json:"base_url"`
+	APIKey           string            `json:"api_key"`
+	Headers          map[string]string `json:"headers,omitempty"`
+	ReasoningEfforts []string          `json:"reasoning_efforts,omitempty"`
+	ReasoningEffort  string            `json:"reasoning_effort,omitempty"`
+}
+
+type ModelConfig struct {
+	ID                 string `json:"id"`
+	CredentialSourceID string `json:"credential_source_id,omitempty"`
+	ProviderConfig
 }
 
 type VisionConfig struct {
@@ -39,11 +48,15 @@ type ContextConfig struct {
 
 type RuntimeConfig struct {
 	LLM struct {
-		Main   ProviderConfig `json:"main"`
-		Vision VisionConfig   `json:"vision"`
+		Main          ProviderConfig `json:"main"`
+		Vision        VisionConfig   `json:"vision"`
+		Models        []ModelConfig  `json:"models,omitempty"`
+		MainModelID   string         `json:"main_model_id,omitempty"`
+		VisionModelID string         `json:"vision_model_id,omitempty"`
 	} `json:"llm"`
 	Model struct {
-		Stream bool `json:"stream"`
+		Stream           bool `json:"stream"`
+		ReasoningSummary bool `json:"reasoning_summary"`
 	} `json:"model"`
 	Tools       map[string]ToolConfig `json:"tools"`
 	ToolTimeout struct {
@@ -87,7 +100,14 @@ func parseConfig(data []byte) (RuntimeConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
+	// Upgrade saved rosters without replacing edited roles or custom agents.
+	if _, err := findAgent(cfg.Agents, "template"); err != nil {
+		cfg.Agents = append(cfg.Agents, defaultAgents()[4])
+	}
 	if err := validateAgents(cfg.Agents); err != nil {
+		return cfg, err
+	}
+	if err := validateModelConfig(&cfg); err != nil {
 		return cfg, err
 	}
 	for _, p := range []*ProviderConfig{&cfg.LLM.Main, &cfg.LLM.Vision.ProviderConfig} {
@@ -187,11 +207,11 @@ func (m *configManager) reloadLocked() {
 }
 
 func redactedConfig(cfg RuntimeConfig) RuntimeConfig {
-	if cfg.LLM.Main.APIKey != "" {
-		cfg.LLM.Main.APIKey = "********"
-	}
-	if cfg.LLM.Vision.APIKey != "" {
-		cfg.LLM.Vision.APIKey = "********"
+	cfg.LLM.Main = redactProvider(cfg.LLM.Main)
+	cfg.LLM.Vision.ProviderConfig = redactProvider(cfg.LLM.Vision.ProviderConfig)
+	cfg.LLM.Models = append([]ModelConfig(nil), cfg.LLM.Models...)
+	for i := range cfg.LLM.Models {
+		cfg.LLM.Models[i].ProviderConfig = redactProvider(cfg.LLM.Models[i].ProviderConfig)
 	}
 	return cfg
 }
@@ -241,6 +261,10 @@ func (m *configManager) save(data []byte) (RuntimeConfig, error) {
 		}
 		object["llm"], _ = json.Marshal(llm)
 		data, _ = json.Marshal(object)
+	}
+	data, err := preserveModelSecrets(data, m.config)
+	if err != nil {
+		return RuntimeConfig{}, err
 	}
 	cfg, err := parseConfig(data)
 	if err != nil {

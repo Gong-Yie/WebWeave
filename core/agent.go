@@ -9,7 +9,9 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -17,11 +19,14 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 
 	"webweave/workspace"
 )
 
 const second = time.Second
+
+var errModelRedirect = errors.New("模型接口返回重定向，请检查 Base URL")
 
 const systemPrompt = `你是一个“网页项目生成型 Agent”，使用完整的 ReAct 工作循环解决用户任务。
 理解用户需求，按需读取当前运行 ID 的资源，检索必要资料，把最终文件写入当前运行 ID 的结果目录。
@@ -49,11 +54,25 @@ func newClient(provider ProviderConfig) (openai.Client, error) {
 	if provider.APIKey == "" {
 		return openai.Client{}, errors.New("未配置大模型 API Key，请在模型配置页面填写")
 	}
-	return openai.NewClient(option.WithAPIKey(provider.APIKey), option.WithBaseURL(strings.TrimRight(provider.BaseURL, "/")+"/"), option.WithMaxRetries(0), option.WithRequestTimeout(10*time.Minute)), nil
+	options := []option.RequestOption{option.WithAPIKey(provider.APIKey), option.WithBaseURL(strings.TrimRight(provider.BaseURL, "/") + "/"), option.WithMaxRetries(0), option.WithRequestTimeout(10 * time.Minute), option.WithHTTPClient(&http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return errModelRedirect }})}
+	for key, value := range provider.Headers {
+		options = append(options, option.WithHeader(key, value))
+	}
+	return openai.NewClient(options...), nil
 }
 
 func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, agent AgentConfig, delegated bool) (string, error) {
-	ctx = context.WithValue(ctx, agentExecutionKey{}, agentExecution{agent, delegated})
+	execution, _ := ctx.Value(agentExecutionKey{}).(agentExecution)
+	execution.agent, execution.delegated = agent, delegated
+	ctx = context.WithValue(ctx, agentExecutionKey{}, execution)
+	templateSkill := ""
+	if agent.ID == "template" {
+		document, err := a.skills.Read("template-maker")
+		if err != nil {
+			return "", fmt.Errorf("加载默认模板制作 Skill: %w", err)
+		}
+		templateSkill = "\n\n默认 Skill：template-maker\n" + document.Instructions
+	}
 	items = compactModelContext(repairItems(items))
 	if err := saveAgentContext(ctx, store, items, nil); err != nil {
 		return "", err
@@ -64,17 +83,38 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 			return "", err
 		}
 		cfg := a.config.get()
-		client, err := newClient(cfg.LLM.Main)
+		provider, err := providerForAgent(cfg, agent)
+		if err != nil {
+			return "", err
+		}
+		effort := execution.effort
+		if effort == "" {
+			effort = provider.ReasoningEffort
+		}
+		if effort != "" && !slices.Contains(provider.ReasoningEfforts, effort) {
+			return "", errors.New("当前模型不支持所选思考强度，请重新选择")
+		}
+		client, err := newClient(provider)
 		if err != nil {
 			return "", err
 		}
 		if cfg.Context.Enabled && estimateTokens(items) >= int(float64(cfg.Context.MaxInputTokens)*cfg.Context.TriggerRatio) {
+			cfg.LLM.Main = provider
 			items, err = a.compressContext(ctx, client, store, items, cfg)
 			if err != nil {
 				return "", err
 			}
 		}
-		params := responses.ResponseNewParams{Model: cfg.LLM.Main.Model, Instructions: openai.String(agentInstructions(agent, cfg, store.id)), Temperature: openai.Float(0.7), Tools: agentTools(agent, cfg)}
+		params := responses.ResponseNewParams{Model: provider.Model, Instructions: openai.String(agentInstructions(agent, cfg, store.id) + templateSkill), Tools: agentTools(agent, cfg)}
+		if len(provider.ReasoningEfforts) == 0 {
+			params.Temperature = openai.Float(0.7)
+		}
+		if effort != "" {
+			params.Reasoning.Effort = shared.ReasoningEffort(effort)
+		}
+		if cfg.Model.ReasoningSummary {
+			params.Reasoning.Summary = shared.ReasoningSummaryAuto
+		}
 		if round == limit {
 			params.Tools = nil
 			params.ToolChoice.OfToolChoiceMode = openai.Opt(responses.ToolChoiceOptionsNone)
@@ -83,9 +123,17 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 				return "", err
 			}
 		}
+		if err := appendAgentEvent(ctx, store, "context_usage", map[string]any{"input_tokens": estimateRequestTokens(params, items), "estimated": true}); err != nil {
+			return "", err
+		}
 		response, err := modelResponse(ctx, client, params, items, cfg.Model.Stream, store)
 		if err != nil {
 			return "", err
+		}
+		if response.Usage.InputTokens > 0 {
+			if err := appendAgentEvent(ctx, store, "context_usage", map[string]any{"input_tokens": response.Usage.InputTokens, "estimated": false}); err != nil {
+				return "", err
+			}
 		}
 		outputs := []inputItem{}
 		for _, output := range response.Output {
@@ -122,6 +170,11 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 			started := time.Now()
 			cancelled := ctx.Err() != nil
 			name, arguments := itemString(call, "name"), itemString(call, "arguments")
+			if !cancelled {
+				if err := appendAgentEvent(ctx, store, "tool_started", map[string]any{"tool_name": name, "arguments": arguments}); err != nil {
+					return "", err
+				}
+			}
 			var result string
 			if cancelled {
 				result = `{"ok":false,"error":{"code":"RUN_STOPPED","message":"运行已由用户停止，工具未执行"}}`
@@ -175,6 +228,9 @@ func modelResponse(ctx context.Context, client openai.Client, params responses.R
 }
 
 func retryableModelError(err error) bool {
+	if errors.Is(err, errModelRedirect) {
+		return false
+	}
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
 		return apiErr.StatusCode == 408 || apiErr.StatusCode == 409 || apiErr.StatusCode == 425 || apiErr.StatusCode == 429 || apiErr.StatusCode >= 500
@@ -198,6 +254,16 @@ func requestResponse(ctx context.Context, client openai.Client, params responses
 	var completed *responses.Response
 	var pending strings.Builder
 	lastFlush := time.Now()
+	var reasoning strings.Builder
+	reasoningKey := ""
+	flushReasoning := func() error {
+		if reasoning.Len() == 0 || store == nil {
+			return nil
+		}
+		err := appendAgentEvent(ctx, store, "model_reasoning_delta", map[string]any{"delta": reasoning.String(), "reasoning_key": reasoningKey})
+		reasoning.Reset()
+		return err
+	}
 	flush := func() error {
 		if pending.Len() == 0 {
 			return nil
@@ -214,11 +280,30 @@ func requestResponse(ctx context.Context, client openai.Client, params responses
 	for stream.Next() {
 		event := stream.Current()
 		if err := ctx.Err(); err != nil {
+			_ = flushReasoning()
 			_ = flush()
 			return nil, err
 		}
 		switch event.Type {
+		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+			key := fmt.Sprintf("%s:%s:%d:%d", event.ItemID, event.Type, event.SummaryIndex, event.ContentIndex)
+			if key != reasoningKey {
+				if err := flushReasoning(); err != nil {
+					return nil, err
+				}
+				reasoningKey = key
+			}
+			reasoning.WriteString(event.Delta)
+			if reasoning.Len() >= 256 || time.Since(lastFlush) >= 200*time.Millisecond {
+				if err := flushReasoning(); err != nil {
+					return nil, err
+				}
+				lastFlush = time.Now()
+			}
 		case "response.output_text.delta":
+			if err := flushReasoning(); err != nil {
+				return nil, err
+			}
 			pending.WriteString(event.Delta)
 			if pending.Len() >= 256 || time.Since(lastFlush) >= 200*time.Millisecond {
 				if err := flush(); err != nil {
@@ -229,11 +314,17 @@ func requestResponse(ctx context.Context, client openai.Client, params responses
 			response := event.Response
 			completed = &response
 		case "error", "response.failed", "response.incomplete":
+			if err := flushReasoning(); err != nil {
+				return nil, err
+			}
 			if err := flush(); err != nil {
 				return nil, err
 			}
 			return nil, fmt.Errorf("模型响应未完成: %s %s", event.Type, event.Message)
 		}
+	}
+	if err := flushReasoning(); err != nil {
+		return nil, err
 	}
 	if err := flush(); err != nil {
 		return nil, err
@@ -257,6 +348,12 @@ func validateResponse(response *responses.Response) (*responses.Response, error)
 func estimateTokens(items []inputItem) int {
 	data, _ := json.Marshal(items)
 	return max(1, (utf8.RuneCount(data)+1)/2)
+}
+
+// Includes the instructions and tool schemas sent alongside conversation items.
+func estimateRequestTokens(params responses.ResponseNewParams, items []inputItem) int {
+	data, _ := json.Marshal(params.Tools)
+	return estimateTokens(items) + (utf8.RuneCountInString(params.Instructions.Value)+utf8.RuneCount(data)+1)/2
 }
 
 func (a *App) prepareUserItem(ctx context.Context, id, text string, attachments []string) (inputItem, error) {
@@ -287,7 +384,12 @@ func (a *App) prepareUserItem(ctx context.Context, id, text string, attachments 
 		client, err := newClient(vision.ProviderConfig)
 		if err == nil {
 			var response *responses.Response
-			response, err = modelResponse(ctx, client, responses.ResponseNewParams{Model: vision.Model, Temperature: openai.Float(0.1)}, []inputItem{{"role": "user", "content": visionContent}}, false, nil)
+			params := responses.ResponseNewParams{Model: vision.Model}
+			if len(vision.ReasoningEfforts) == 0 {
+				params.Temperature = openai.Float(0.1)
+			}
+			params.Reasoning.Effort = shared.ReasoningEffort(vision.ReasoningEffort)
+			response, err = modelResponse(ctx, client, params, []inputItem{{"role": "user", "content": visionContent}}, false, nil)
 			if err == nil && strings.TrimSpace(response.OutputText()) != "" {
 				return inputItem{"role": "user", "content": text + "\n\n[图片视觉描述]\n" + response.OutputText()}, nil
 			}

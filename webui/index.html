@@ -22,15 +22,19 @@
         </div>
 
         <nav class="primary-nav" aria-label="控制台导航">
-          <span class="nav-group-label">工作空间</span>
           <button class="nav-item is-active" data-view="home" type="button" title="仪表盘" aria-current="page"><i data-lucide="layout-dashboard"></i><span>仪表盘</span></button>
           <button class="nav-item" data-view="workspace" type="button" title="工作台"><i data-lucide="panels-top-left"></i><span>工作台</span></button>
+          <button class="nav-item" data-view="templates" type="button" title="前端模板"><i data-lucide="layout-template"></i><span>前端模板</span></button>
           <button class="nav-item" data-view="skills" type="button" title="Skills"><i data-lucide="blocks"></i><span>Skills</span></button>
           <button class="nav-item" data-view="agents" type="button" title="Agent 管理"><i data-lucide="users-round"></i><span>Agent 管理</span></button>
-          <span class="nav-group-label">配置管理</span>
-          <button class="nav-item" data-view="settings" data-settings-page="config" type="button" title="运行配置"><i data-lucide="sliders-horizontal"></i><span>运行配置</span></button>
-          <button class="nav-item" data-view="settings" data-settings-page="llm" type="button" title="模型配置"><i data-lucide="bot"></i><span>模型配置</span></button>
-          <button class="nav-item" data-view="settings" data-settings-page="style" type="button" title="外观设置"><i data-lucide="palette"></i><span>外观设置</span></button>
+          <details id="nav-settings" class="nav-settings">
+            <summary title="设置"><i data-lucide="settings-2"></i><span>设置</span><i class="settings-chevron" data-lucide="chevron-right"></i></summary>
+            <div class="nav-settings-items">
+              <button class="nav-item" data-view="settings" data-settings-page="config" type="button" title="运行配置"><i data-lucide="sliders-horizontal"></i><span>运行配置</span></button>
+              <button class="nav-item" data-view="settings" data-settings-page="llm" type="button" title="模型配置"><i data-lucide="bot"></i><span>模型配置</span></button>
+              <button class="nav-item" data-view="settings" data-settings-page="style" type="button" title="外观设置"><i data-lucide="palette"></i><span>外观设置</span></button>
+            </div>
+          </details>
         </nav>
 
         <section class="conversation-history" aria-label="对话历史">
@@ -96,6 +100,12 @@
         </section>
 
         <section id="workspace-view" class="view" aria-label="工作台">
+          <div id="workspace-empty" class="workspace-empty">
+            <div class="empty-workspace-mark" aria-hidden="true"><i data-lucide="square-pen"></i></div>
+            <h1>从一个新对话开始</h1>
+            <p>描述要制作的网页，或从左侧打开已有对话。</p>
+            <button id="workspace-new-run" class="button button-primary" type="button"><i data-lucide="plus"></i>创建新对话</button>
+          </div>
           <header class="workspace-header">
             <div class="active-run-heading"><strong id="active-run-title">新对话</strong><span id="active-run-id">尚未选择</span></div>
             <div class="header-actions">
@@ -108,6 +118,11 @@
             <section class="conversation" aria-label="对话内容">
               <div id="conversation-scroll" class="conversation-scroll"></div>
               <div class="composer-wrap">
+                <form id="template-save-form" class="template-save-form" hidden>
+                  <div><strong>模板制作已完成</strong><small>先检查预览和文件，再确认保存。</small></div>
+                  <label><span class="sr-only">模板名称</span><input id="template-save-name" required maxlength="120" placeholder="模板名称" /></label>
+                  <button id="template-save" class="button button-secondary compact" type="submit">保存到模板库</button>
+                </form>
                 <div id="attachment-list" class="attachment-list"></div>
                 <div class="composer">
                   <textarea id="prompt-input" rows="4" placeholder="描述你想构建或修改的内容" aria-label="任务输入"></textarea>
@@ -120,9 +135,14 @@
                         <select id="agent-select" aria-label="选择执行任务的 Agent" disabled><option value="main">主Agent</option></select>
                         <i data-lucide="chevron-down"></i>
                       </div>
+                      <div id="reasoning-effort-wrap" class="select-wrap reasoning-effort-wrap" hidden><select id="reasoning-effort" aria-label="本次对话思考强度"><option value="">模型默认</option></select><i data-lucide="chevron-down"></i></div>
                     </div>
                     <button id="primary-action" class="send-button" type="button"><span>发送</span><i data-lucide="arrow-up"></i></button>
                   </div>
+                </div>
+                <div id="context-meter" class="context-meter" role="meter" aria-label="API 输入 Token 占压缩阈值比例" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                  <svg class="token-ring" viewBox="0 0 24 24" aria-hidden="true"><circle class="token-ring-track" cx="12" cy="12" r="9" /><circle id="token-ring-value" cx="12" cy="12" r="9" pathLength="100" /></svg>
+                  <span id="context-meter-label">等待模型请求</span>
                 </div>
               </div>
             </section>
@@ -211,6 +231,17 @@
           </div>
         </section>
 
+        <section id="templates-view" class="view skills-view templates-view" aria-label="前端模板">
+          <header class="skills-header agents-header">
+            <div><span class="eyebrow">可复用的起点</span><h1>前端模板</h1><p>制作、预览，再把满意的作品保存到模板库。</p></div>
+            <button id="template-create" class="button button-primary" type="button" disabled><i data-lucide="plus"></i>创建模板</button>
+          </header>
+          <div class="skills-content">
+            <div class="template-library-note"><i data-lucide="folder"></i><span>模板文件夹 <code>data/templates</code></span><button id="templates-refresh" class="icon-button subtle" type="button" title="刷新模板库" aria-label="刷新模板库"><i data-lucide="refresh-cw"></i></button></div>
+            <div id="templates-list" class="templates-list"><p class="dashboard-placeholder">正在读取模板…</p></div>
+          </div>
+        </section>
+
         <section id="skills-view" class="view skills-view" aria-label="Skills">
           <header class="skills-header">
             <div><span class="eyebrow">能力管理</span><h1>Skills</h1><p>查看当前工作台可用的本地能力。</p></div>
@@ -223,7 +254,7 @@
 
         <section id="agents-view" class="view skills-view agents-view" aria-label="Agent 管理">
           <header class="skills-header agents-header">
-            <div><span class="eyebrow">团队协作</span><h1>Agent 管理</h1><p>主 Agent 协调团队，专业 Agent 各司其职。所有 Agent 使用当前主模型。</p></div>
+            <div><span class="eyebrow">团队协作</span><h1>Agent 管理</h1><p>主 Agent 协调团队，子 Agent 可以选择独立模型，也可以跟随主模型。</p></div>
             <button id="agent-add" class="button button-primary" type="button" disabled><i data-lucide="plus"></i>添加 Agent</button>
           </header>
           <div class="skills-content agents-content">
@@ -233,6 +264,7 @@
               <div class="llm-fields">
                 <label><span>名称</span><input id="agent-name" type="text" required placeholder="例如：内容策划 Agent" /></label>
                 <label><span>职责描述</span><input id="agent-description" type="text" placeholder="简述这个 Agent 负责的工作" /></label>
+                <label><span>执行模型</span><select id="agent-model"><option value="">跟随主模型</option></select><small>留空则与主 Agent 使用相同模型；主 Agent 在模型配置页选择。</small></label>
                 <label><span>角色指令</span><textarea id="agent-prompt" rows="10" required placeholder="定义角色、工作方法、任务边界和交付要求"></textarea></label>
               </div>
               <p class="agent-editor-hint">保存后可在工作台选择，主 Agent 也可调用。</p>
@@ -252,6 +284,7 @@
                 <div class="settings-copy"><h2>模型输出</h2><p>控制 Responses API 的输出方式。</p></div>
                 <div class="context-settings">
                   <div class="setting-line"><span><strong>流式输出</strong><small>生成过程中逐步显示内容</small></span><label class="switch"><input id="model-stream" type="checkbox" /><span></span></label></div>
+                  <div class="setting-line"><span><strong>请求思考摘要</strong><small>发送 reasoning.summary=auto，仅在模型接口支持时开启；接口主动返回的思考内容会直接显示</small></span><label class="switch"><input id="model-reasoning-summary" type="checkbox" /><span></span></label></div>
                 </div>
               </section>
               <section class="settings-section">
@@ -281,24 +314,37 @@
             </div>
           </div>
           <div id="settings-llm-page" class="settings-page">
-            <div class="settings-content">
-              <section class="settings-section">
-                <div class="settings-copy"><h2>主模型</h2><p>负责理解任务、调用工具并生成最终结果。</p></div>
-                <div class="llm-fields">
-                  <label><span>模型名称</span><input id="llm-main-model" type="text" autocomplete="off" /></label>
-                  <label><span>兼容接口地址</span><input id="llm-main-base-url" type="url" autocomplete="off" /></label>
-                  <label><span>API Key</span><input id="llm-main-api-key" type="text" autocomplete="new-password" placeholder="请输入 API Key" /></label>
+            <div class="settings-content model-settings-content">
+              <div class="model-role-selectors">
+                <label><span>主模型</span><select id="llm-main-select" aria-label="主 Agent 模型"></select></label>
+                <label><span>视觉模型（可选）</span><select id="llm-vision-select" aria-label="独立视觉模型"><option value="">不使用独立视觉模型</option></select></label>
+              </div>
+              <div class="model-library-heading"><div><h2>模型列表</h2><p>添加接口配置，或识别接口中可用的模型。</p></div><button id="model-add" class="button button-secondary" type="button" disabled><i data-lucide="plus"></i>添加模型</button></div>
+              <div class="model-list-heading" aria-hidden="true"><span>Model name</span><span>Base URL</span><span>默认思考强度</span><span></span></div>
+              <div id="model-list" class="model-list"></div>
+              <form id="model-editor" class="model-editor" hidden>
+                <header><div><h2 id="model-editor-title">添加模型</h2><p>手动填写模型名称，或识别后导入。</p></div><button id="model-editor-close" class="icon-button subtle" type="button" aria-label="关闭模型编辑"><i data-lucide="x"></i></button></header>
+                <div class="model-connection-fields">
+                  <label><span>Base URL</span><input id="model-base-url" type="url" required placeholder="https://api.example.com/v1" autocomplete="off" /></label>
+                  <label><span>API Key</span><input id="model-api-key" type="password" placeholder="填写 API Key" autocomplete="new-password" /></label>
+                  <label><span>Model name</span><input id="model-name" type="text" placeholder="输入模型名称，或识别后导入" autocomplete="off" /></label>
                 </div>
-              </section>
-              <section class="settings-section">
-                <div class="settings-copy"><h2>视觉模型</h2><p>启用后先将图片转成文字和视觉描述，再交给主模型。</p></div>
-                <div class="llm-fields">
-                  <div class="setting-line"><span><strong>启用视觉模型</strong><small>未启用时由主模型直接识别图片</small></span><label class="switch"><input id="llm-vision-enabled" type="checkbox" /><span></span></label></div>
-                  <label><span>模型名称</span><input id="llm-vision-model" type="text" autocomplete="off" /></label>
-                  <label><span>兼容接口地址</span><input id="llm-vision-base-url" type="url" autocomplete="off" /></label>
-                  <label><span>API Key</span><input id="llm-vision-api-key" type="text" autocomplete="new-password" placeholder="请输入 API Key" /></label>
-                </div>
-              </section>
+                <details id="model-advanced" class="model-advanced"><summary>高级项<i data-lucide="chevron-down"></i></summary>
+                  <div class="model-advanced-content">
+                    <div class="model-advanced-heading"><div><strong>自定义 Headers</strong><p>为空时使用接口默认请求头。</p></div><button id="model-header-add" class="text-button" type="button"><i data-lucide="plus"></i>添加 Header</button></div>
+                    <div id="model-headers" class="model-headers"></div>
+                    <label class="reasoning-capability"><input id="model-supports-reasoning" type="checkbox" /><span>模型支持思考强度设置</span></label>
+                    <div id="model-reasoning-settings" class="model-reasoning-settings" hidden>
+                      <p>按模型接口实际支持的档位勾选。模型列表识别不会推断这些能力。</p>
+                      <div id="model-supported-efforts" class="model-supported-efforts"></div>
+                      <label><span>默认思考强度</span><select id="model-default-effort"><option value="">接口默认</option></select></label>
+                    </div>
+                  </div>
+                </details>
+                <div class="model-editor-actions"><button id="model-detect" class="button button-secondary" type="button"><i data-lucide="list-filter"></i>识别模型列表</button><button id="model-editor-save" class="button button-primary" type="submit">加入列表</button></div>
+                <div id="model-discovery" class="model-discovery" hidden><header><strong id="model-discovery-count">可用模型</strong><label><input id="model-discovery-all" type="checkbox" checked />全选</label></header><div id="model-discovery-list" class="model-discovery-list"></div><button id="model-import" class="button button-primary" type="button">一键导入所选模型</button></div>
+                <p class="model-save-hint">加入列表后，点击页面右上角“保存配置”应用更改。</p>
+              </form>
             </div>
           </div>
           <div id="settings-style-page" class="settings-page">

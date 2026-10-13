@@ -1,15 +1,16 @@
 {
   "llm": {
-    "main": {
-      "model": "deepseek-v4-flash",
-      "base_url": "https://api.deepseek.com",
-      "api_key": ""
-    },
+    "models": [
+      {
+        "id": "main-model",
+        "model": "deepseek-v4-flash",
+        "base_url": "https://api.deepseek.com",
+        "api_key": ""
+      }
+    ],
+    "main_model_id": "main-model",
     "vision": {
-      "enabled": true,
-      "model": "deepseek-v4-flash-vision-exp",
-      "base_url": "https://api.deepseek.com",
-      "api_key": ""
+      "enabled": false
     }
   },
   "tools": {
@@ -43,7 +44,8 @@
     }
   },
   "model": {
-    "stream": true
+    "stream": true,
+    "reasoning_summary": false
   },
   "tool_timeout": {
     "default_seconds": 120.0,

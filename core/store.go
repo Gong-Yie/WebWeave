@@ -25,6 +25,7 @@ type runEvent struct {
 type runState struct {
 	RunID            string          `json:"run_id"`
 	AgentID          string          `json:"agent_id"`
+	ReasoningEffort  string          `json:"reasoning_effort,omitempty"`
 	Status           string          `json:"status"`
 	UpdatedAt        string          `json:"updated_at"`
 	LastEvent        string          `json:"last_event"`
@@ -146,6 +147,17 @@ func (s *runStore) selectAgent(agent AgentConfig) error {
 		return err
 	}
 	state.AgentID = agent.ID
+	return workspace.WriteJSONAtomic(filepath.Join(s.dir, "state.json"), state)
+}
+
+func (s *runStore) selectReasoningEffort(effort string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.stateLocked()
+	if err != nil {
+		return err
+	}
+	state.ReasoningEffort = effort
 	return workspace.WriteJSONAtomic(filepath.Join(s.dir, "state.json"), state)
 }
 

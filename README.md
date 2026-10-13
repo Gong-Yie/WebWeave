@@ -113,9 +113,9 @@ WebWeave/
 
 Agent 使用 ReAct 循环理解需求，并按需调用工具完成任务。每轮模型响应都可以继续读取工具结果，直到生成结果或向用户询问必要信息。
 
-系统默认提供主Agent、网站灵感设计Agent、代码编程Agent和代码审计Agent。在左侧“Agent 管理”中可编辑角色指令、添加自定义 Agent 和删除自定义 Agent。所有 Agent 共用 `llm.main` 模型配置；定义保存在 `config.json` 的 `agents` 数组，旧配置未包含该字段时自动提供四个默认 Agent。
+系统默认提供主Agent、网站灵感设计Agent、代码编程Agent、代码审计Agent和前端模板制作Agent。在左侧“Agent 管理”中可编辑角色指令、添加自定义 Agent 和删除自定义 Agent。主 Agent 使用模型配置页选择的主模型；子 Agent 的 `model_id` 留空时继承主模型，也可以选择模型列表中的独立配置。定义保存在 `config.json` 的 `agents` 数组。旧配置会自动补充前端模板制作 Agent，保留已编辑的角色及自定义 Agent。
 
-工作台输入框下方的下拉框默认选择主Agent，可以切换本次任务的执行 Agent。重新打开对话会恢复上次执行的 Agent，停止后继续也会保留选择。主 Agent 可通过 `call_agent` 调用所有专业及自定义 Agent；委派任务共享当前运行的文件目录，使用独立上下文，结果返回主 Agent 后由它继续处理。对话与工具记录显示实际执行的 Agent。默认 Agent 可以编辑，不能删除。
+工作台输入框下方的下拉框默认选择主Agent，可以切换本次任务的执行 Agent。重新打开对话会恢复上次执行的 Agent，停止后继续也会保留选择。主 Agent 可通过 `call_agent` 调用所有专业及自定义 Agent；每次委派都是具有独立 ID 和上下文的子 Agent 任务，共享当前运行的文件目录，结果返回主 Agent 后由它继续处理。当前对话的侧栏展示子 Agent 的任务、当前活动以及完成、失败或中断状态，点击可定位对应记录。对话与工具记录显示实际执行的 Agent。默认 Agent 可以编辑，不能删除。
 
 当前内置工具包括：
 
@@ -134,6 +134,7 @@ Agent 使用 ReAct 循环理解需求，并按需调用工具完成任务。每�
 每个对话都有唯一运行 ID，输入资源、生成结果、下载文件、事件日志、状态和上下文互相隔离。对话支持：
 
 - 流式显示模型输出
+- 折叠展示模型接口返回的思考文本或摘要，支持流式更新和历史恢复；接口没有返回时只展示真实执行状态
 - 协作式停止和停止后继续
 - 历史记录重新打开
 - 对话记录删除（保留附件、下载及生成文件，与原后端行为一致）
@@ -176,7 +177,13 @@ Agent 生成网页后，可以通过实例面板直接查看本地预览。检�
 
 模型上下文会缩短大型工具结果（正文预览最多 12,000 字符）和已成功写入的大型文件内容；完整结果仍保存在 `events.jsonl`，源码保存在结果文件中。压缩请求的历史片段限制为 24,000 字符，保留最初需求、最近用户消息和完整工具调用配对。压缩失败时保留原需求及已有摘要，并在 `context_compressed.compression_error` 中记录原因。后续保存上下文会继续保留摘要元数据。
 
-配置模板的 `context.max_input_tokens` 调整为 65,536，避免等到数十万 Token 才触发压缩。Token 数仍是程序估算值，并非模型提供商的精确计费值。`file_read` 的普通相对路径默认指向当前运行的 result 目录，也支持显式 scope、项目 `data` 路径和允许的绝对路径。
+配置模板的 `context.max_input_tokens` 为 65,536。输入框下面的圆环显示最近一次模型请求的输入 Token 与压缩阈值（`max_input_tokens × compression_trigger_ratio`），包括子 Agent 请求，并在提示中标明执行者。接口返回 `usage.input_tokens` 时显示 API 值，否则显示包含对话、角色指令及工具定义的估算值。压缩判断仍使用现有的对话项目估算；图片及供应商分词差异使估算值不能作为精确计费依据。`file_read` 的普通相对路径默认指向当前运行的 result 目录，也支持显式 scope、项目 `data` 路径和允许的绝对路径。
+
+### 前端模板库
+
+左侧“前端模板”页面的“创建模板”按钮会进入工作台，创建并持久化选择前端模板制作 Agent 的新对话。系统在该 Agent 执行前默认加载 `template-maker` Skill，无需用户额外指定或由模型主动读取。标题统一为“标题”+数字 id，正文统一为“文本”+数字 id，其他命名组件统一为“组件”+数字 id，重点突出效果和可复用性。源码位于当前对话的 `result/{模板名}` 文件夹，固定且仅有 `index.html`、`style.css` 和 `script.js`，HTML 引用同目录 CSS/JS；启动和替换说明直接在对话中交付。
+
+任务完成后，输入框上方显示模板名称和“保存到模板库”按钮。检查预览及文件后点击按钮并确认，复制为 `data/templates/{模板名}` 中的独立快照；该文件夹仍只有三个文件，元数据单独存入 `data/templates/.metadata/{模板ID}.json`。入库检查三文件结构、占位文字、组件命名、重复 id 和 CSS/JS 引用，拒绝同名覆盖、非法目录名、符号链接、非普通文件和超过 100 MB 的模板。已有旧格式模板继续列出，不自动改写。删除制作对话不会删除已保存的模板。
 
 上下文达到 `config.json` 中的阈值后，Agent 会生成摘要并保留最近项目，降低长对话的输入成本。配置文件与 `data/skills` 中的 SKILL 文件支持运行时重新读取。工具定义和分发位于 `tools/registry.go`，文件、搜索与终端实现分别位于对应模块文件；修改 Go 源码后需要重新编译或重新执行 `go run`。
 
@@ -222,26 +229,32 @@ Copy-Item config.json.example config.json
 ```json
 {
   "llm": {
-    "main": {
-      "model": "your-main-model",
-      "base_url": "https://api.example.com/v1",
-      "api_key": "your-main-api-key"
-    },
-    "vision": {
-      "enabled": false,
-      "model": "",
-      "base_url": "",
-      "api_key": ""
-    }
+    "models": [
+      {
+        "id": "main-model",
+        "model": "your-main-model",
+        "base_url": "https://api.example.com/v1",
+        "api_key": "your-main-api-key"
+      }
+    ],
+    "main_model_id": "main-model",
+    "vision": { "enabled": false }
   }
 }
 ```
 
-`llm.main` 是主模型配置。视觉模型是可选的，只有在 `enabled` 为 `true` 时才需要填写完整的模型、地址和 Key。LLM 配置统一保存在 `config.json`，不再从 `.env` 读取。请勿将真实 API Key 提交到 Git 仓库。
+`llm.models` 保存模型列表，`main_model_id` 选择主模型，`vision_model_id` 选择可选视觉模型。旧的 `llm.main` 和 `llm.vision` 配置继续兼容；首次在新界面保存后会使用模型列表，后端同时保留角色镜像。LLM 配置统一保存在 `config.json`，不从 `.env` 读取。请勿将真实 API Key 提交到 Git 仓库。
+
+模型配置页采用列表：添加模型后填写 Base URL、Model name 和 API Key；填写地址和 Key 后可点击“识别模型列表”，通过该地址下的 `/models` 读取可用模型，勾选后“一键导入所选模型”。列表编辑及导入先更新页面草稿，点击右上角“保存配置”持久化并应用。识别失败时可直接手动填写 Model name。
+
+高级项默认收起，没有自定义 Headers 或思考强度设置。展开后可添加 `headers` 键值对，并声明模型实际支持的 `reasoning_efforts` 档位及默认 `reasoning_effort`。API Key 和 Header 值在返回配置时掩码，按稳定模型 ID 保留。模型识别不会推断思考能力；各接口、模型支持的档位应以实际接口为准。
+
+支持思考强度的模型会在对话输入区显示档位选择。留空使用该模型配置的默认档位，没有默认配置时省略 `reasoning.effort`；明确选择的档位会保存到对话，停止后继续保留。主 Agent 的对话覆盖只作用于当前执行者，委派的子 Agent 使用其自身模型默认档位。未声明支持的模型不显示选择器，也不接受强度覆盖。模型列表、消息、继续接口和 Agent 编辑都会校验引用及档位。
 
 其他运行参数包括：
 
 - `model.stream`：是否流式输出
+- `model.reasoning_summary`：是否发送 `reasoning.summary=auto` 请求思考摘要，默认关闭以保持兼容；在运行配置中仅为支持该参数的模型开启。接口主动返回的思考文本和摘要无需打开此开关即可显示
 - `tools.<name>.enabled`：是否向模型暴露工具
 - `tools.<name>.run_scoped`：是否允许工具访问当前运行的隔离目录
 - `tool_timeout`：工具默认和最大超时
@@ -291,7 +304,7 @@ go run . --cli --run-id 现有运行ID
 
 ### 2. 完成一次网页任务
 
-1. 点击“新建对话”或左侧“工作台”。
+1. 点击“新建对话”，或进入左侧“工作台”后点击空页面上的“创建新对话”。工作台导航只切换页面，不创建对话；已有活动对话会保留。
 2. 描述网页目标、页面结构、视觉风格和交互要求。
 3. 通过附件按钮上传参考图、需求文档或其他资源。
 4. 观察对话区和执行检查区中的工具调用过程。
@@ -336,9 +349,12 @@ WebUI 同时提供用于前端和自动化集成的本地 API：
 | `GET` / `POST` | `/api/agents` | 列出 Agent 或添加自定义 Agent |
 | `PUT` / `DELETE` | `/api/agents/{agent_id}` | 编辑 Agent 或删除自定义 Agent |
 | `GET` / `POST` | `/api/runs` | 列出或创建对话 |
+| `GET` | `/api/templates` | 获取已确认入库的前端模板 |
+| `POST` | `/api/models/discover` | 使用指定或已保存的接口凭据识别模型列表 |
+| `POST` | `/api/runs/{run_id}/template` | 用户确认后保存已完成的模板，传入 `name` 和 `approved: true` |
 | `DELETE` | `/api/runs/{run_id}` | 删除对话记录，保留资源与生成文件 |
 
-`POST /api/runs/{run_id}/messages` 支持 `agent_id`，省略时使用主Agent。`POST /api/runs/{run_id}/continue` 可传入 `agent_id` 切换执行者，空请求体则沿用对话中保存的 Agent。
+`POST /api/runs` 可传入 `agent_id` 并持久化初始执行者，省略时使用主Agent。`POST /api/runs/{run_id}/messages` 支持 `agent_id` 和 `reasoning_effort`，省略 Agent 时使用主Agent。`POST /api/runs/{run_id}/continue` 可传入 `agent_id` 切换执行者和 `reasoning_effort` 覆盖档位，空请求体则沿用对话设置。对话详情的 `context_usage` 提供最近请求的 Token、估算标记和当前压缩阈值。子 Agent 生命周期及思考流保存在运行事件中。
 
 ## 贡献指南
 

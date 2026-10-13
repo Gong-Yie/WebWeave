@@ -20,19 +20,21 @@ type AgentConfig struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Prompt      string `json:"prompt"`
+	ModelID     string `json:"model_id,omitempty"`
 }
 
 func defaultAgents() []AgentConfig {
 	return []AgentConfig{
-		{"main", "主Agent", "统筹任务，调用其他 Agent 并整合结果。", "你是主 Agent，负责理解完整需求、规划任务、协调所有专业 Agent 并交付最终结果。按需使用 call_agent 委派设计、编程、审计或自定义任务，明确目标、文件路径和验收要求，读取委派结果后继续推进。"},
-		{"design", "网站灵感设计Agent", "探索网站灵感、视觉风格与交互设计。", "你是网站灵感设计 Agent，负责网站参考资料、视觉方向、页面结构、排版、配色与交互设计。先读取相关资源，按需搜索灵感，产出具体且可实施的设计方案。被委派时只完成委派范围，并给出方案、依据和交付文件路径。"},
-		{"code", "代码编程Agent", "编写和修改代码，完成网站功能。", "你是代码编程 Agent，负责阅读已有代码、实现网站功能与修复问题。沿用项目已有技术栈，以最小改动满足需求，按需运行相关验证，报告实际修改的文件和验证结果。被委派时只完成委派范围。"},
-		{"audit", "代码审计Agent", "检查代码正确性、安全边界与实现质量。", "你是代码审计 Agent，负责审查代码正确性、安全性、需求符合度和关键边界。先阅读实际源码，报告有证据的问题、严重程度、文件位置和修复建议。默认只审查；只有任务明确要求修复时才修改文件。不得伪造测试或审查结果。"},
+		{"main", "主Agent", "统筹任务，调用其他 Agent 并整合结果。", "你是主 Agent，负责理解完整需求、规划任务、协调所有专业 Agent 并交付最终结果。按需使用 call_agent 委派设计、编程、审计或自定义任务，明确目标、文件路径和验收要求，读取委派结果后继续推进。", ""},
+		{"design", "网站灵感设计Agent", "探索网站灵感、视觉风格与交互设计。", "你是网站灵感设计 Agent，负责网站参考资料、视觉方向、页面结构、排版、配色与交互设计。先读取相关资源，按需搜索灵感，产出具体且可实施的设计方案。被委派时只完成委派范围，并给出方案、依据和交付文件路径。", ""},
+		{"code", "代码编程Agent", "编写和修改代码，完成网站功能。", "你是代码编程 Agent，负责阅读已有代码、实现网站功能与修复问题。沿用项目已有技术栈，以最小改动满足需求，按需运行相关验证，报告实际修改的文件和验证结果。被委派时只完成委派范围。", ""},
+		{"audit", "代码审计Agent", "检查代码正确性、安全边界与实现质量。", "你是代码审计 Agent，负责审查代码正确性、安全性、需求符合度和关键边界。先阅读实际源码，报告有证据的问题、严重程度、文件位置和修复建议。默认只审查；只有任务明确要求修复时才修改文件。不得伪造测试或审查结果。", ""},
+		{"template", "前端模板制作Agent", "制作突出效果、可复用的三文件前端模板，预览后由用户确认入库。", "你是前端模板制作 Agent，默认使用系统加载的 template-maker Skill。在以模板名命名的文件夹中制作 index.html、style.css、script.js 三个文件，标题文字统一为标题+id，正文统一为文本+id，其他命名组件统一为组件+id，重点突出视觉效果和可复用性。源码写入当前运行 result 目录，启动预览。交付后提示用户检查预览和文件，在界面点击“保存到模板库”确认入库；不得直接写入模板库或替用户同意。", ""},
 	}
 }
 
 func builtInAgent(id string) bool {
-	return id == "main" || id == "design" || id == "code" || id == "audit"
+	return id == "main" || id == "design" || id == "code" || id == "audit" || id == "template"
 }
 
 func validateAgents(agents []AgentConfig) error {
@@ -43,6 +45,10 @@ func validateAgents(agents []AgentConfig) error {
 		agent.Name = strings.TrimSpace(agent.Name)
 		agent.Description = strings.TrimSpace(agent.Description)
 		agent.Prompt = strings.TrimSpace(agent.Prompt)
+		agent.ModelID = strings.TrimSpace(agent.ModelID)
+		if agent.ID == "main" && agent.ModelID != "" {
+			return errors.New("主 Agent 使用模型配置页选定的主模型")
+		}
 		if !workspace.ValidName(agent.ID) || agent.Name == "" || agent.Prompt == "" {
 			return errors.New("Agent ID 必须是有效名称，名称和角色指令不能为空")
 		}
@@ -110,6 +116,9 @@ func (m *configManager) changeAgent(agent AgentConfig, method string) ([]AgentCo
 	if err := validateAgents(cfg.Agents); err != nil {
 		return nil, apiError{400, "INVALID_AGENT", err.Error()}
 	}
+	if err := validateModelConfig(&cfg); err != nil {
+		return nil, apiError{400, "INVALID_MODEL", err.Error()}
+	}
 	if err := workspace.WriteJSONAtomic(m.path, cfg); err != nil {
 		return nil, err
 	}
@@ -148,6 +157,9 @@ func (a *App) handleAgents(r *http.Request) (any, int, error) {
 type agentExecution struct {
 	agent     AgentConfig
 	delegated bool
+	taskID    string
+	parentID  string
+	effort    string
 }
 
 type agentExecutionKey struct{}
@@ -157,6 +169,10 @@ func appendAgentEvent(ctx context.Context, store *runStore, kind string, payload
 		payload["agent_id"] = execution.agent.ID
 		payload["agent_name"] = execution.agent.Name
 		payload["delegated"] = execution.delegated
+		if execution.taskID != "" {
+			payload["subagent_id"] = execution.taskID
+			payload["parent_agent_id"] = execution.parentID
+		}
 	}
 	return store.append(kind, payload)
 }
@@ -253,7 +269,22 @@ func (a *App) callAgent(ctx context.Context, store *runStore, caller AgentConfig
 	}
 	delegateCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	execution := agentExecution{agent: agent, delegated: true, taskID: workspace.NewID(), parentID: caller.ID}
+	delegateCtx = context.WithValue(delegateCtx, agentExecutionKey{}, execution)
+	if err := appendAgentEvent(delegateCtx, store, "subagent_started", map[string]any{"task": args.Task}); err != nil {
+		return fail(err)
+	}
 	text, err := a.runAgent(delegateCtx, store, []inputItem{{"role": "user", "content": args.Task}}, agent, true)
+	status, reason := "completed", ""
+	if err != nil {
+		status, reason = "failed", err.Error()
+		if delegateCtx.Err() != nil {
+			status = "stopped"
+		}
+	}
+	if eventErr := appendAgentEvent(delegateCtx, store, "subagent_finished", map[string]any{"status": status, "reason": reason}); eventErr != nil {
+		return fail(eventErr)
+	}
 	if err != nil {
 		return fail(fmt.Errorf("%s 执行失败: %w", agent.Name, err))
 	}

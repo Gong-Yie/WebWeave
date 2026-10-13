@@ -40,10 +40,11 @@ func TestMultiAgentManagement(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &listing); err != nil {
 		t.Fatal(err)
 	}
-	if len(listing.Agents) != 5 || listing.Agents[4].ID == "" || strings.Contains(response.Body.String(), "keep-secret") {
+	defaultCount := len(defaultAgents())
+	if len(listing.Agents) != defaultCount+1 || listing.Agents[defaultCount].ID == "" || strings.Contains(response.Body.String(), "keep-secret") {
 		t.Fatal("custom agent creation or response secrecy failed")
 	}
-	agent := listing.Agents[4]
+	agent := listing.Agents[defaultCount]
 	agent.Prompt = "检查中文内容"
 	assertStatus(t, apiRequest(t, app, "PUT", "/api/agents/"+agent.ID, agent), 200)
 	// A settings client without the new field must preserve the current roster.
@@ -58,7 +59,7 @@ func TestMultiAgentManagement(t *testing.T) {
 	delete(olderConfig, "agents")
 	assertStatus(t, apiRequest(t, app, "PUT", "/api/config", olderConfig), 200)
 	saved := app.config.get()
-	if saved.LLM.Main.APIKey != "keep-secret" || saved.Model.Stream || len(saved.Agents) != 5 || saved.Agents[4].Prompt != agent.Prompt {
+	if saved.LLM.Main.APIKey != "keep-secret" || saved.Model.Stream || len(saved.Agents) != defaultCount+1 || saved.Agents[defaultCount].Prompt != agent.Prompt {
 		t.Fatal("agent or configuration save discarded unrelated values")
 	}
 	fresh := newConfigManager(app.root).get()
@@ -81,11 +82,11 @@ func TestMultiAgentManagement(t *testing.T) {
 			assertStatus(t, apiRequest(t, app, test.method, test.path, test.body), test.status)
 		})
 	}
-	if len(app.config.get().Agents) != 5 {
+	if len(app.config.get().Agents) != defaultCount+1 {
 		t.Fatal("invalid edits changed the roster")
 	}
 	assertStatus(t, apiRequest(t, app, "DELETE", "/api/agents/"+agent.ID, nil), 200)
-	if len(app.config.get().Agents) != 4 {
+	if len(app.config.get().Agents) != defaultCount {
 		t.Fatal("custom agent was not deleted")
 	}
 	for _, agents := range [][]AgentConfig{{}, {defaultAgents()[0]}, append(defaultAgents(), defaultAgents()[0])} {
@@ -100,10 +101,13 @@ func TestMultiAgentManagement(t *testing.T) {
 }
 
 func TestMultiAgentSelectionAndResume(t *testing.T) {
-	for _, agentID := range []string{"", "design", "code", "audit", "custom"} {
+	for _, agentID := range []string{"", "design", "code", "audit", "template", "custom"} {
 		t.Run("agent="+agentID, func(t *testing.T) {
 			app := testApp(t)
 			run := testRun(t, app, "selected-agent")
+			if agentID == "template" {
+				installTemplateSkill(t, app)
+			}
 			var calls atomic.Int32
 			started := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -121,6 +125,9 @@ func TestMultiAgentSelectionAndResume(t *testing.T) {
 				}
 				if !strings.Contains(request.Instructions, "（ID："+selected+"）") {
 					t.Error("selected role was not used")
+				}
+				if selected == "template" && !strings.Contains(request.Instructions, "文件夹内固定且仅有") {
+					t.Error("default template skill was not injected")
 				}
 				delegation := false
 				for _, tool := range request.Tools {
@@ -141,7 +148,7 @@ func TestMultiAgentSelectionAndResume(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 			useProvider(t, app, server.URL, true)
-			assertStatus(t, apiRequest(t, app, "POST", "/api/agents", AgentConfig{"custom", "自定义Agent", "自定义任务", "处理自定义任务"}), 201)
+			assertStatus(t, apiRequest(t, app, "POST", "/api/agents", AgentConfig{"custom", "自定义Agent", "自定义任务", "处理自定义任务", ""}), 201)
 			before, err := run.store.readState()
 			if err != nil {
 				t.Fatal(err)
@@ -182,10 +189,13 @@ func TestMultiAgentSelectionAndResume(t *testing.T) {
 }
 
 func TestMultiAgentDelegation(t *testing.T) {
-	for _, target := range []string{"design", "code", "audit", "custom"} {
+	for _, target := range []string{"design", "code", "audit", "template", "custom"} {
 		t.Run(target, func(t *testing.T) {
 			app := testApp(t)
 			run := testRun(t, app, "delegation")
+			if target == "template" {
+				installTemplateSkill(t, app)
+			}
 			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var request struct {
@@ -227,7 +237,7 @@ func TestMultiAgentDelegation(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 			useProvider(t, app, server.URL, true)
-			assertStatus(t, apiRequest(t, app, "POST", "/api/agents", AgentConfig{"custom", "自定义Agent", "自定义任务", "处理委派任务"}), 201)
+			assertStatus(t, apiRequest(t, app, "POST", "/api/agents", AgentConfig{"custom", "自定义Agent", "自定义任务", "处理委派任务", ""}), 201)
 			assertStatus(t, apiRequest(t, app, "POST", "/api/runs/delegation/messages", map[string]any{"content": "主任务"}), 202)
 			awaitJob(t, jobDone(t, run))
 			detail, err := app.detail(run.store.id)
@@ -239,16 +249,29 @@ func TestMultiAgentDelegation(t *testing.T) {
 				t.Fatal("delegated agent did not share run files")
 			}
 			delegatedEvents := 0
+			subagentID := ""
+			started, finished := false, false
 			for _, event := range detail.Events {
 				if event.Payload["delegated"] == true {
 					delegatedEvents++
 					if event.Payload["agent_id"] != target {
 						t.Fatal("delegated event attribution mismatch")
 					}
+					if subagentID == "" {
+						subagentID, _ = event.Payload["subagent_id"].(string)
+					}
+					if subagentID == "" || event.Payload["subagent_id"] != subagentID || event.Payload["parent_agent_id"] != "main" {
+						t.Fatal("subagent identity or parent mismatch")
+					}
+					started = started || event.Type == "subagent_started"
+					finished = finished || (event.Type == "subagent_finished" && event.Payload["status"] == "completed")
 				}
 			}
 			if delegatedEvents < 4 {
 				t.Fatal("delegated streaming, model and tool events missing")
+			}
+			if !started || !finished {
+				t.Fatal("subagent lifecycle events missing")
 			}
 			saved, err := run.store.loadItems()
 			if err != nil || len(saved) != 4 {
@@ -327,6 +350,10 @@ func TestMultiAgentDelegationErrors(t *testing.T) {
 			case text := <-result:
 				if !strings.Contains(text, `"ok":false`) || !strings.Contains(text, "执行失败") {
 					t.Fatal("cancellation did not return a failure")
+				}
+				_, events, err := run.store.snapshot()
+				if err != nil || len(events) == 0 || events[len(events)-1].Type != "subagent_finished" || events[len(events)-1].Payload["status"] != "stopped" {
+					t.Fatal("cancelled subagent was not marked stopped")
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("delegation ignored timeout or cancellation")

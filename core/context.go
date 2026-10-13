@@ -12,6 +12,7 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 const (
@@ -220,7 +221,12 @@ func (a *App) compressContext(ctx context.Context, client openai.Client, store *
 	}
 	var summary contextSummary
 	compressionCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.Context.TimeoutSeconds*float64(time.Second)))
-	response, err := modelResponse(compressionCtx, client, responses.ResponseNewParams{Model: cfg.LLM.Main.Model, MaxOutputTokens: openai.Int(int64(cfg.Context.SummaryMaxTokens)), Temperature: openai.Float(0.1)}, compressionPrompt(items[:start], goal, latest), false, nil)
+	params := responses.ResponseNewParams{Model: cfg.LLM.Main.Model, MaxOutputTokens: openai.Int(int64(cfg.Context.SummaryMaxTokens))}
+	if len(cfg.LLM.Main.ReasoningEfforts) == 0 {
+		params.Temperature = openai.Float(0.1)
+	}
+	params.Reasoning.Effort = shared.ReasoningEffort(cfg.LLM.Main.ReasoningEffort)
+	response, err := modelResponse(compressionCtx, client, params, compressionPrompt(items[:start], goal, latest), false, nil)
 	cancel()
 	if err == nil {
 		text := strings.TrimSpace(response.OutputText())

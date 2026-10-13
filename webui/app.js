@@ -26,7 +26,16 @@ const state = {
   skillErrors: [],
   agents: [],
   selectedAgentId: "main",
+  selectedReasoningEffort: "",
   editingAgentId: null,
+  modelsDraft: [],
+  mainModelId: "",
+  visionModelId: "",
+  editingModelId: null,
+  modelDiscovery: [],
+  runFiles: [],
+  templates: [],
+  reasoningOpen: new Map(),
   appearance: {
     theme: localStorage.getItem("webweave-theme") || "system",
     backgroundUrl: "",
@@ -100,6 +109,7 @@ function setConnection(connected) {
 }
 
 function switchView(viewName) {
+  if (viewName === "settings") $("#nav-settings").open = true;
   document.querySelectorAll(".nav-item").forEach((item) => {
     const active =
       item.dataset.view === viewName &&
@@ -114,7 +124,9 @@ function switchView(viewName) {
   $("#console-page-title").textContent =
     viewName === "settings"
       ? $("#settings-title").textContent
-      : { home: "仪表盘", workspace: "工作台", skills: "Skills", agents: "Agent 管理" }[viewName];
+      : { home: "仪表盘", workspace: "工作台", templates: "前端模板", skills: "Skills", agents: "Agent 管理" }[viewName];
+  if (viewName === "workspace") renderWorkspaceState();
+  if (viewName === "templates") runSafely(loadTemplates);
   const settingsHash = state.settingsPage === "config"
     ? "settings"
     : `settings/${state.settingsPage}`;
@@ -308,7 +320,7 @@ function renderRuns() {
     const meta = element(
       "span",
       "",
-      `${run.run_id} · ${statusLabel(run.status)}`,
+      `${statusLabel(run.status)} · ${formatTime(run.updated_at)}`,
     );
     openButton.append(title, meta);
     openButton.addEventListener("click", () => activateRun(run.run_id));
@@ -322,6 +334,29 @@ function renderRuns() {
       runSafely(() => deleteRun(run.run_id));
     });
     item.append(openButton, deleteButton);
+    if (run.run_id === state.activeRunId && state.activeRun) {
+      const tasks = collectSubagents(state.activeRun);
+      if (tasks.length) {
+        const tree = element("div", "subagent-tree");
+        tasks.forEach((task) => {
+          const child = element("button", "subagent-row");
+          child.type = "button";
+          child.dataset.status = task.status;
+          child.title = `${task.task}\n${task.reason || task.activity}`;
+          child.append(element("span", "subagent-dot"));
+          const copy = element("span", "subagent-copy");
+          copy.append(element("strong", "", task.name), element("small", "", task.activity));
+          child.append(copy, element("span", "subagent-status", statusLabel(task.status)));
+          child.addEventListener("click", () => {
+            switchView("workspace");
+            const message = Array.from(document.querySelectorAll("[data-subagent-id]")).find((node) => node.dataset.subagentId === task.id);
+            if (message) message.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth", block: "center" });
+          });
+          tree.append(child);
+        });
+        item.append(tree);
+      }
+    }
     history.append(item);
 
     if (index < 6) {
@@ -446,14 +481,14 @@ async function deleteRun(runId) {
     state.selection = null;
     selectionContext.hidden = true;
     renderPendingContext();
-    switchView("home");
+    switchView("workspace");
   }
   await loadRuns();
   showToast("对话已删除");
 }
 
-async function createRun() {
-  const payload = await api("/api/runs", { method: "POST" });
+async function createRun(agentId = "main") {
+  const payload = await api("/api/runs", { method: "POST", body: JSON.stringify({ agent_id: agentId }) });
   await loadRuns();
   await activateRun(payload.run.run_id);
   promptInput.focus();
@@ -461,14 +496,20 @@ async function createRun() {
 
 async function activateRun(runId) {
   state.activeRunId = runId;
+  state.runFiles = [];
   state.renderedRunKey = "";
   state.frameKey = "";
   state.selection = null;
+  state.pendingFiles = [];
+  state.pendingContexts = [];
+  promptInput.value = "";
+  renderPendingContext();
   selectionContext.hidden = true;
   renderRuns();
   switchView("workspace");
   await loadActiveRun(true);
   state.selectedAgentId = state.activeRun?.state?.agent_id || "main";
+  state.selectedReasoningEffort = state.activeRun?.state?.reasoning_effort || "";
   renderAgentSelector();
 }
 
@@ -480,6 +521,9 @@ async function loadActiveRun(force = false) {
     return;
   }
   state.activeRun = payload.run;
+  renderWorkspaceState();
+  renderContextMeter(payload.run);
+  renderTemplateSave(payload.run);
   const key = [
     payload.run.event_count,
     payload.run.status,
@@ -503,6 +547,131 @@ function renderRunHeader(run) {
   $("#active-run-id").textContent = run.run_id;
   $("#fact-run-id").textContent = run.run_id;
   $("#files-run-id").textContent = run.run_id;
+}
+
+function renderWorkspaceState() {
+  const empty = !state.activeRunId;
+  $("#workspace-empty").hidden = !empty;
+  $(".workspace-header").hidden = empty;
+  workspaceGrid.hidden = empty;
+}
+
+function renderContextMeter(run) {
+  const usage = run.context_usage;
+  const meter = $("#context-meter");
+  if (!usage) {
+    $("#context-meter-label").textContent = "等待模型请求";
+    meter.setAttribute("aria-valuenow", "0");
+    $("#token-ring-value").style.strokeDasharray = "0 100";
+    return;
+  }
+  const percentage = Math.min(100, Math.max(0, usage.input_tokens / usage.threshold * 100));
+  const source = usage.estimated ? "估算" : "API";
+  const label = `${source} ${usage.input_tokens.toLocaleString()} / ${usage.threshold.toLocaleString()} Token`;
+  $("#context-meter-label").textContent = label;
+  meter.title = `${usage.agent_name || "当前对话"}${usage.delegated ? " · 子 Agent" : ""} · 最近一次 API 输入${usage.estimated ? "（含指令和工具定义的估算值）" : "（接口返回值）"} · 压缩阈值${usage.compression_enabled ? "" : "（自动压缩已关闭）"}`;
+  meter.dataset.level = percentage >= 90 ? "high" : "normal";
+  meter.setAttribute("aria-valuenow", String(Math.round(percentage)));
+  meter.setAttribute("aria-valuetext", label);
+  $("#token-ring-value").style.strokeDasharray = `${percentage} 100`;
+}
+
+function collectSubagents(run) {
+  const tasks = new Map();
+  for (const event of run.events) {
+    const payload = event.payload || {};
+    const id = payload.subagent_id;
+    if (!id) continue;
+    if (event.type === "subagent_started") {
+      tasks.set(id, { id, name: payload.agent_name, task: payload.task, status: "running", activity: "等待模型响应" });
+    }
+    const task = tasks.get(id);
+    if (!task) continue;
+    if (event.type === "tool_started") task.activity = `调用 ${payload.tool_name}${toolArgumentHint(payload)}`;
+    if (event.type === "tool_output") task.activity = `已执行 ${payload.tool_name}`;
+    if (event.type === "context_usage" && payload.estimated) task.activity = "等待模型响应";
+    if (event.type === "model_reasoning_delta") task.activity = "正在思考";
+    if (event.type === "model_output_delta") task.activity = "正在生成";
+    if (event.type === "subagent_finished") {
+      task.status = payload.status;
+      task.reason = payload.reason;
+      task.activity = payload.reason || (payload.status === "completed" ? "结果已返回主 Agent" : statusLabel(payload.status));
+    }
+  }
+  for (const task of tasks.values()) {
+    if (task.status === "running" && !run.job_active) {
+      task.status = "stopped";
+      task.activity = "执行已中断";
+    }
+  }
+  return [...tasks.values()];
+}
+
+async function loadTemplates() {
+  const payload = await api("/api/templates");
+  state.templates = payload.templates;
+  const list = $("#templates-list");
+  list.replaceChildren();
+  if (!state.templates.length) {
+    const empty = element("div", "template-empty");
+    empty.append(icon("layout-template"), element("h2", "", "还没有保存的模板"), element("p", "", "创建模板会开启专用对话，由前端模板制作 Agent 完成。检查结果并确认保存后，模板会出现在这里。"));
+    list.append(empty);
+  }
+  [...state.templates].reverse().forEach((template) => {
+    const card = element("article", "template-card");
+    const mark = element("div", "template-card-mark");
+    mark.append(icon("panels-top-left"), element("span", "", `${template.file_count} 个文件`));
+    card.append(mark, element("h2", "", template.name), element("p", "", formatTime(template.created_at)), element("code", "template-path", template.path));
+    const open = element("button", "text-button", "打开制作对话");
+    open.type = "button";
+    open.disabled = !state.runs.some((run) => run.run_id === template.run_id);
+    open.title = open.disabled ? "原对话已删除，模板文件仍保留在模板库" : "查看制作过程与原始预览";
+    open.addEventListener("click", () => runSafely(() => activateRun(template.run_id)));
+    card.append(open);
+    list.append(card);
+  });
+  refreshIcons();
+}
+
+function renderTemplateSave(run) {
+  const ready = run.state?.agent_id === "template" && run.status === "completed" && !run.job_active;
+  $("#template-save-form").hidden = !ready;
+  const input = $("#template-save-name");
+  if (input.dataset.runId !== run.run_id) {
+    input.dataset.runId = run.run_id;
+    input.value = run.title.slice(0, 120);
+    delete input.dataset.sourceFolder;
+  }
+  if (ready) {
+    const resultFiles = state.runFiles.filter((file) => file.scope === "result");
+    const folders = [...new Set(resultFiles.map((file) => file.path.split("/")[0]))];
+    const candidates = folders.filter((folder) => {
+      const files = resultFiles.filter((file) => file.path.startsWith(folder + "/"));
+      return files.length === 3 && ["index.html", "style.css", "script.js"].every((name) => files.some((file) => file.path === `${folder}/${name}`));
+    });
+    if (candidates.length === 1) {
+      input.dataset.sourceFolder = candidates[0];
+      if (input.value === run.title.slice(0, 120)) input.value = candidates[0];
+    }
+  }
+}
+
+async function saveActiveTemplate() {
+  const run = state.activeRun;
+  const name = $("#template-save-name").value.trim();
+  if (!name || !run || run.job_active) return;
+  if (!window.confirm(`确认将“${name}”保存到 data/templates/${name}？请先检查预览和三个模板文件；同名模板不会被覆盖。`)) return;
+  const button = $("#template-save");
+  button.disabled = true;
+  try {
+    const request = { name, approved: true };
+    if ($("#template-save-name").dataset.sourceFolder) request.source_folder = $("#template-save-name").dataset.sourceFolder;
+    await api(`/api/runs/${encodeURIComponent(run.run_id)}/template`, { method: "POST", body: JSON.stringify(request) });
+    await loadTemplates();
+    showToast("模板已保存到模板库");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function conversationIntro(run) {
@@ -531,17 +700,48 @@ function renderConversation(run) {
   let streamedText = "";
   let streamedAgent = "WebWeave";
   let streamedDelegated = false;
+  let streamedSubagent = "";
+  let reasoningBlock = null;
+  const reasoningParts = new Map();
+
+  const showReasoning = (text, payload, key) => {
+    if (!reasoningBlock) {
+      const block = element("details", "reasoning-block");
+      block.dataset.subagentId = payload.subagent_id || "";
+      const openKey = `${run.run_id}:${key}`;
+      block.open = state.reasoningOpen.get(openKey) ?? run.job_active;
+      const summary = element("summary");
+      summary.append(icon("chevron-right"), element("span", "", `${payload.agent_name || "WebWeave"} · 思考过程`));
+      const body = element("div", "reasoning-body");
+      block.append(summary, body);
+      block.addEventListener("toggle", () => {
+        state.reasoningOpen.set(openKey, block.open);
+      });
+      container.append(block);
+      reasoningBlock = body;
+    }
+    reasoningBlock.textContent = text;
+  };
 
   const flushStreamedText = () => {
     if (!streamedText.trim()) {
       streamedText = "";
       return;
     }
-    container.append(createAgentMessage(streamedText, streamedAgent, streamedDelegated));
+    container.append(createAgentMessage(streamedText, streamedAgent, streamedDelegated, streamedSubagent));
     streamedText = "";
   };
 
-  run.events.forEach((event) => {
+  run.events.forEach((event, index) => {
+    if (event.type === "model_reasoning_delta") {
+      flushTools();
+      flushStreamedText();
+      const payload = event.payload || {};
+      const key = payload.reasoning_key || "reasoning";
+      reasoningParts.set(key, (reasoningParts.get(key) || "") + (payload.delta || ""));
+      showReasoning([...reasoningParts.values()].join("\n\n"), payload, index);
+      return;
+    }
     if (event.type === "tool_output") {
       flushStreamedText();
       toolEvents.push(event);
@@ -559,11 +759,19 @@ function renderConversation(run) {
       if (agentName !== streamedAgent) flushStreamedText();
       streamedAgent = agentName;
       streamedDelegated = Boolean(event.payload?.delegated);
+      streamedSubagent = event.payload?.subagent_id || "";
       const delta = event.payload?.delta;
       if (typeof delta === "string") streamedText += delta;
       return;
     }
     if (event.type === "model_output") {
+      const reasoning = (event.payload?.items || []).filter((item) => item.type === "reasoning").map((item) => {
+        const parts = item.summary?.length ? item.summary : item.content;
+        return (parts || []).map((part) => part.text || "").filter(Boolean).join("\n\n");
+      }).filter(Boolean).join("\n\n");
+      if (reasoning) showReasoning(reasoning, event.payload || {}, index);
+      reasoningBlock = null;
+      reasoningParts.clear();
       const text = event.payload?.output_text;
       flushTools();
       if (typeof text === "string" && text.trim()) {
@@ -571,6 +779,7 @@ function renderConversation(run) {
       }
       streamedAgent = event.payload?.agent_name || "WebWeave";
       streamedDelegated = Boolean(event.payload?.delegated);
+      streamedSubagent = event.payload?.subagent_id || "";
       flushStreamedText();
     }
   });
@@ -579,7 +788,13 @@ function renderConversation(run) {
 
   if (run.job_active) {
     const working = element("div", "agent-working");
-    working.append(element("span"), element("span"), element("span"));
+    const latest = [...run.events].reverse().find((event) => ["context_usage", "model_reasoning_delta", "model_output_delta", "tool_started", "tool_output", "llm_retry"].includes(event.type));
+    const stage = latest?.type === "tool_started" ? `正在调用 ${latest.payload.tool_name}`
+      : latest?.type === "model_reasoning_delta" ? "正在思考"
+      : latest?.type === "model_output_delta" ? "正在生成"
+      : latest?.type === "llm_retry" ? "连接中断，正在重试"
+      : "等待模型响应";
+    working.append(element("span"), element("span"), element("span"), element("small", "", stage));
     container.append(working);
   }
   refreshIcons();
@@ -608,11 +823,12 @@ function createUserMessage(payload) {
   return article;
 }
 
-function createAgentMessage(text, agentName = "WebWeave", delegated = false) {
+function createAgentMessage(text, agentName = "WebWeave", delegated = false, subagentId = "") {
   const article = element("article", "message message-agent");
+  article.dataset.subagentId = subagentId;
   article.append(element("div", "agent-avatar", "W"));
   const content = element("div", "message-content");
-  content.append(element("div", "message-author", agentName + (delegated ? " · 委派任务" : "")));
+  content.append(element("div", "message-author", agentName + (delegated ? " · 子 Agent" : "")));
   const body = element("div", "message-body prose");
   text.split(/\n{2,}/).forEach((paragraph) => {
     body.append(element("p", "", paragraph));
@@ -624,6 +840,7 @@ function createAgentMessage(text, agentName = "WebWeave", delegated = false) {
 
 function createActivityCard(events) {
   const card = element("article", "activity-card");
+  card.dataset.subagentId = events[0]?.payload?.subagent_id || "";
   const summary = element("button", "activity-summary");
   summary.type = "button";
   summary.setAttribute("aria-expanded", "false");
@@ -733,6 +950,7 @@ function updateActionFromRun(run) {
 function updateAction(action, status = null) {
   state.action = action;
   $("#agent-select").disabled = action === "running" || !state.agents.length;
+  $("#reasoning-effort").disabled = action === "running";
   primaryAction.classList.toggle("is-running", action === "running");
   primaryAction.classList.toggle("is-paused", action === "paused");
   if (action === "running") {
@@ -752,12 +970,7 @@ function updateAction(action, status = null) {
 }
 
 async function handlePrimaryAction() {
-  if (!state.activeRunId) {
-    const selectedAgentId = state.selectedAgentId;
-    await createRun();
-    state.selectedAgentId = selectedAgentId;
-    renderAgentSelector();
-  }
+  if (!state.activeRunId) return;
   if (state.action === "running") {
     await api(`/api/runs/${encodeURIComponent(state.activeRunId)}/stop`, {
       method: "POST",
@@ -769,7 +982,7 @@ async function handlePrimaryAction() {
   if (state.action === "paused" && !promptInput.value.trim()) {
     await api(`/api/runs/${encodeURIComponent(state.activeRunId)}/continue`, {
       method: "POST",
-      body: JSON.stringify({ agent_id: state.selectedAgentId }),
+      body: JSON.stringify({ agent_id: state.selectedAgentId, reasoning_effort: state.selectedReasoningEffort }),
     });
     showToast("已继续运行");
     await loadActiveRun(true);
@@ -797,6 +1010,7 @@ async function handlePrimaryAction() {
       body: JSON.stringify({
         content,
         agent_id: state.selectedAgentId,
+        reasoning_effort: state.selectedReasoningEffort,
         attachments: attachmentNames,
         instance_context: state.pendingContexts,
       }),
@@ -856,6 +1070,8 @@ async function loadFiles() {
   const payload = await api(
     `/api/runs/${encodeURIComponent(state.activeRunId)}/files`,
   );
+  state.runFiles = payload.files;
+  if (state.activeRun) renderTemplateSave(state.activeRun);
   renderFileTree(payload.files);
 }
 
@@ -1047,12 +1263,266 @@ function injectSelectionIntoPrompt() {
   promptInput.setSelectionRange(promptInput.value.length, promptInput.value.length);
 }
 
+const effortLabels = { none: "关闭", minimal: "最少", low: "低", medium: "中", high: "高", xhigh: "更高", max: "最高" };
+
+function configuredModels(config = state.config) {
+  if (config?.llm?.models?.length) return config.llm.models;
+  const models = [];
+  if (config?.llm?.main?.model) models.push({ ...config.llm.main, id: "legacy-main" });
+  if (config?.llm?.vision?.model) models.push({ ...config.llm.vision, id: "legacy-vision" });
+  return models;
+}
+
+function fillModelSelect(select, models, selected, emptyLabel = null) {
+  select.replaceChildren();
+  if (emptyLabel !== null) {
+    const option = element("option", "", emptyLabel);
+    option.value = "";
+    select.append(option);
+  }
+  models.forEach((model) => {
+    const option = element("option", "", `${model.model} · ${model.base_url}`);
+    option.value = model.id;
+    select.append(option);
+  });
+  select.value = selected;
+}
+
+function renderModelSettings() {
+  fillModelSelect($("#llm-main-select"), state.modelsDraft, state.mainModelId);
+  fillModelSelect($("#llm-vision-select"), state.modelsDraft, state.visionModelId, "不使用独立视觉模型");
+  const list = $("#model-list");
+  list.replaceChildren();
+  state.modelsDraft.forEach((model) => {
+    const row = element("div", "model-row");
+    const name = element("div", "model-row-name");
+    name.append(element("strong", "", model.model));
+    const roles = [model.id === state.mainModelId ? "主模型" : "", model.id === state.visionModelId ? "视觉模型" : ""].filter(Boolean);
+    if (roles.length) name.append(element("small", "model-role-label", roles.join(" · ")));
+    const url = element("code", "model-row-url", model.base_url);
+    url.title = model.base_url;
+    const effort = element("span", "model-row-effort", model.reasoning_efforts?.length ? (effortLabels[model.reasoning_effort] || "接口默认") : "—");
+    const actions = element("div", "model-row-actions");
+    const edit = element("button", "text-button", "编辑");
+    edit.type = "button";
+    edit.addEventListener("click", () => openModelEditor(model));
+    const remove = element("button", "text-button danger", "删除");
+    remove.type = "button";
+    remove.disabled = model.id === state.mainModelId;
+    remove.title = remove.disabled ? "请先选择其他主模型" : "从列表移除，保存配置后生效";
+    remove.addEventListener("click", () => {
+      if (state.agents.some((agent) => agent.model_id === model.id)) { showToast("请先将使用此模型的 Agent 改为其他模型或跟随主模型"); return; }
+      state.modelsDraft = state.modelsDraft.filter((entry) => entry.id !== model.id);
+      if (state.visionModelId === model.id) state.visionModelId = "";
+      if (state.editingModelId === model.id) closeModelEditor();
+      renderModelSettings();
+      markConfigDirty();
+    });
+    actions.append(edit, remove);
+    row.append(name, url, effort, actions);
+    list.append(row);
+  });
+  $("#model-add").disabled = !state.configReady;
+  refreshIcons();
+}
+
+function renderReasoningSelector() {
+  const agent = state.agents.find((entry) => entry.id === state.selectedAgentId);
+  const models = configuredModels();
+  const modelId = agent?.id !== "main" && agent?.model_id ? agent.model_id : state.config?.llm?.main_model_id;
+  const provider = models.find((entry) => entry.id === modelId) || state.config?.llm?.main || {};
+  const efforts = provider.reasoning_efforts || [];
+  const select = $("#reasoning-effort");
+  select.replaceChildren();
+  const defaultOption = element("option", "", `默认 · ${effortLabels[provider.reasoning_effort] || "接口默认"}`);
+  defaultOption.value = "";
+  select.append(defaultOption);
+  efforts.forEach((effort) => {
+    const option = element("option", "", effortLabels[effort] || effort);
+    option.value = effort;
+    select.append(option);
+  });
+  if (!efforts.includes(state.selectedReasoningEffort)) state.selectedReasoningEffort = "";
+  select.value = state.selectedReasoningEffort;
+  select.disabled = state.action === "running";
+  $("#reasoning-effort-wrap").hidden = !efforts.length;
+}
+
+function addModelHeader(key = "", value = "") {
+  const row = element("div", "model-header-row");
+  const name = element("input", "model-header-name");
+  name.value = key;
+  name.placeholder = "Header 名称，例如 X-Project";
+  name.setAttribute("aria-label", "Header 名称");
+  const content = element("input", "model-header-value");
+  content.type = "password";
+  content.value = value;
+  content.placeholder = "Header 值";
+  content.setAttribute("aria-label", "Header 值");
+  if (value === "********") setSecretInput(content, value);
+  const remove = element("button", "icon-button subtle danger");
+  remove.type = "button";
+  remove.setAttribute("aria-label", "移除 Header");
+  remove.append(icon("x"));
+  remove.addEventListener("click", () => row.remove());
+  row.append(name, content, remove);
+  $("#model-headers").append(row);
+  refreshIcons();
+}
+
+function openModelEditor(model = null) {
+  state.editingModelId = model?.id || null;
+  state.modelDiscovery = [];
+  $("#model-editor-title").textContent = model ? "编辑模型" : "添加模型";
+  $("#model-editor-save").textContent = model ? "更新列表" : "加入列表";
+  $("#model-base-url").value = model?.base_url || "";
+  $("#model-name").value = model?.model || "";
+  if (model?.api_key && model.api_key !== "********") {
+    $("#model-api-key").value = model.api_key;
+    $("#model-api-key").dataset.masked = "false";
+    $("#model-api-key").onfocus = null;
+  } else setSecretInput($("#model-api-key"), model?.api_key);
+  $("#model-headers").replaceChildren();
+  Object.entries(model?.headers || {}).forEach(([key, value]) => addModelHeader(key, value));
+  $("#model-advanced").open = false;
+  $("#model-discovery").hidden = true;
+  $("#model-supported-efforts").replaceChildren();
+  Object.entries(effortLabels).forEach(([effort, label]) => {
+    const item = element("label");
+    const input = element("input");
+    input.type = "checkbox";
+    input.value = effort;
+    input.checked = Boolean(model?.reasoning_efforts?.includes(effort));
+    input.addEventListener("change", renderModelEfforts);
+    item.append(input, document.createTextNode(`${label} · ${effort}`));
+    $("#model-supported-efforts").append(item);
+  });
+  $("#model-supports-reasoning").checked = Boolean(model?.reasoning_efforts?.length);
+  renderModelEfforts(model?.reasoning_effort || "");
+  $("#model-editor").hidden = false;
+  $("#model-base-url").focus();
+}
+
+function closeModelEditor() {
+  $("#model-editor").hidden = true;
+  state.editingModelId = null;
+}
+
+function checkedModelEfforts() {
+  return $("#model-supports-reasoning").checked ? [...document.querySelectorAll("#model-supported-efforts input:checked")].map((input) => input.value) : [];
+}
+
+function renderModelEfforts(preferred = null) {
+  const select = $("#model-default-effort");
+  const selected = typeof preferred === "string" ? preferred : select.value;
+  const efforts = checkedModelEfforts();
+  select.replaceChildren();
+  const option = element("option", "", "接口默认");
+  option.value = "";
+  select.append(option);
+  efforts.forEach((effort) => {
+    const entry = element("option", "", effortLabels[effort]);
+    entry.value = effort;
+    select.append(entry);
+  });
+  select.value = efforts.includes(selected) ? selected : "";
+  $("#model-reasoning-settings").hidden = !$("#model-supports-reasoning").checked;
+}
+
+function readModelEditor() {
+  const headers = {};
+  const names = new Set();
+  document.querySelectorAll("#model-headers .model-header-row").forEach((row) => {
+    const key = row.querySelector(".model-header-name").value.trim();
+    const input = row.querySelector(".model-header-value");
+    if (!key) throw new Error("请填写 Header 名称，或移除空行");
+    if (names.has(key.toLowerCase())) throw new Error("Header 名称不能重复");
+    names.add(key.toLowerCase());
+    headers[key] = input.dataset.masked === "true" ? "********" : input.value;
+  });
+  const model = {
+    model: $("#model-name").value.trim(),
+    base_url: $("#model-base-url").value.trim().replace(/\/+$/, ""),
+    api_key: $("#model-api-key").dataset.masked === "true" ? $("#model-api-key").value : $("#model-api-key").value.trim(),
+  };
+  if (!model.base_url) throw new Error("请填写 Base URL");
+  if (Object.keys(headers).length) model.headers = headers;
+  const efforts = checkedModelEfforts();
+  if ($("#model-supports-reasoning").checked && !efforts.length) throw new Error("请勾选该模型实际支持的思考强度档位");
+  if (efforts.length) {
+    model.reasoning_efforts = efforts;
+    if ($("#model-default-effort").value) model.reasoning_effort = $("#model-default-effort").value;
+  }
+  return model;
+}
+
+function saveModelEditor() {
+  const model = readModelEditor();
+  if (!model.model) throw new Error("请填写 Model name，或识别并导入模型");
+  model.id = state.editingModelId || window.crypto.randomUUID().replaceAll("-", "");
+  const index = state.modelsDraft.findIndex((entry) => entry.id === model.id);
+  if (index < 0) state.modelsDraft.push(model);
+  else state.modelsDraft[index] = model;
+  if (!state.mainModelId) state.mainModelId = model.id;
+  closeModelEditor();
+  renderModelSettings();
+  markConfigDirty();
+  showToast("模型列表已更新，保存配置后生效");
+}
+
+async function detectModels() {
+  const provider = readModelEditor();
+  const button = $("#model-detect");
+  button.disabled = true;
+  try {
+    const payload = await api("/api/models/discover", { method: "POST", body: JSON.stringify({ ...provider, id: state.editingModelId || "" }) });
+    state.modelDiscovery = payload.models;
+    $("#model-discovery-count").textContent = `${payload.models.length} 个可用模型`;
+    const list = $("#model-discovery-list");
+    list.replaceChildren();
+    payload.models.forEach((model) => {
+      const row = element("label");
+      const input = element("input");
+      input.type = "checkbox";
+      input.value = model;
+      input.checked = true;
+      row.append(input, document.createTextNode(model));
+      list.append(row);
+    });
+    $("#model-discovery-all").checked = true;
+    $("#model-import").disabled = !payload.models.length;
+    $("#model-discovery").hidden = false;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function importDetectedModels() {
+  if (!state.modelDiscovery.length) throw new Error("请先识别当前接口的模型列表");
+  const provider = readModelEditor();
+  const selected = [...document.querySelectorAll("#model-discovery-list input:checked")].map((input) => input.value);
+  let count = 0;
+  selected.forEach((name) => {
+    if (state.modelsDraft.some((entry) => entry.model === name && entry.base_url.replace(/\/+$/, "") === provider.base_url)) return;
+    const entry = { ...provider, model: name, id: window.crypto.randomUUID().replaceAll("-", "") };
+    if (state.editingModelId && (!provider.api_key || provider.api_key === "********" || Object.values(provider.headers || {}).includes("********"))) entry.credential_source_id = state.editingModelId;
+    state.modelsDraft.push(entry);
+    if (!state.mainModelId) state.mainModelId = entry.id;
+    count++;
+  });
+  renderModelSettings();
+  if (count) markConfigDirty();
+  showToast(count ? `已导入 ${count} 个模型，保存配置后生效` : "所选模型已在列表中");
+}
+
 async function loadConfig() {
   setConfigAvailability(false);
   const payload = await api("/api/config");
   state.config = payload.config;
   renderConfig();
   setConfigAvailability(true);
+  $("#template-create").disabled = !state.agents.some((agent) => agent.id === "template");
+  if (state.activeRun) renderContextMeter(state.activeRun);
 }
 
 function renderAgentSelector() {
@@ -1073,6 +1543,7 @@ function renderAgentSelector() {
   }
   select.value = state.selectedAgentId;
   select.disabled = state.action === "running" || !state.agents.length;
+  renderReasoningSelector();
 }
 
 function renderAgents() {
@@ -1082,15 +1553,17 @@ function renderAgents() {
     list.append(element("div", "empty-panel", "当前服务尚未支持 Agent 管理，请更新并重启服务。"));
   }
   state.agents.forEach((agent) => {
-    const builtIn = ["main", "design", "code", "audit"].includes(agent.id);
+    const builtIn = ["main", "design", "code", "audit", "template"].includes(agent.id);
     const card = element("article", `agent-card${agent.id === "main" ? " agent-card-main" : ""}`);
     const heading = element("header");
     const avatar = element("span", "agent-card-icon");
-    avatar.append(icon({ main: "network", design: "palette", code: "code-2", audit: "shield-check" }[agent.id] || "bot"));
+    avatar.append(icon({ main: "network", design: "palette", code: "code-2", audit: "shield-check", template: "layout-template" }[agent.id] || "bot"));
     const copy = element("div");
     copy.append(element("h2", "", agent.name), element("span", "agent-card-role", agent.id === "main" ? "默认执行 · 可调用全部 Agent" : builtIn ? "专业 Agent" : "自定义 Agent"));
     heading.append(avatar, copy);
     card.append(heading, element("p", "skill-description", agent.description || "未填写职责描述"));
+    const model = configuredModels().find((entry) => entry.id === agent.model_id);
+    card.append(element("p", "agent-model-caption", agent.id === "main" ? `主模型 · ${state.config?.llm?.main?.model || "未配置"}` : model ? `独立模型 · ${model.model}` : "跟随主模型"));
     const footer = element("footer");
     const edit = element("button", "text-button", "编辑");
     edit.type = "button";
@@ -1118,6 +1591,8 @@ function openAgentEditor(agent = null) {
   $("#agent-name").value = agent?.name || "";
   $("#agent-description").value = agent?.description || "";
   $("#agent-prompt").value = agent?.prompt || "";
+  fillModelSelect($("#agent-model"), configuredModels(), agent?.model_id || "", "跟随主模型");
+  $("#agent-model").disabled = agent?.id === "main";
   $("#agent-form").hidden = false;
   $(".agents-content").classList.add("is-editing");
   $("#agent-name").focus();
@@ -1136,6 +1611,7 @@ async function saveAgent() {
     name: $("#agent-name").value.trim(),
     description: $("#agent-description").value.trim(),
     prompt: $("#agent-prompt").value.trim(),
+    model_id: id === "main" ? "" : $("#agent-model").value,
   };
   if (!agent.name || !agent.prompt) {
     showToast("请填写 Agent 名称和角色指令");
@@ -1169,12 +1645,12 @@ function setConfigAvailability(available) {
   state.configReady = available;
   document
     .querySelectorAll(
-      "#settings-config-page input, #settings-llm-page input, #settings-save",
+      "#settings-config-page input, #settings-llm-page input, #settings-llm-page select, #settings-llm-page button, #settings-save",
     )
     .forEach((input) => {
       input.disabled = !available;
     });
-  if (available) setVisionFieldsState();
+  $("#model-add").disabled = !available;
 }
 
 function renderConfig() {
@@ -1201,6 +1677,8 @@ function renderConfig() {
     tools.append(row);
   });
   $("#model-stream").checked = config.model.stream;
+  $("#model-reasoning-summary").checked = Boolean(config.model.reasoning_summary);
+  $("#template-create").disabled = !state.agents.some((agent) => agent.id === "template");
   $("#timeout-default").value = config.tool_timeout.default_seconds;
   $("#timeout-max").value = config.tool_timeout.max_seconds;
   $("#context-enabled").checked = config.context.enabled;
@@ -1210,20 +1688,14 @@ function renderConfig() {
   $("#context-summary").value = config.context.summary_max_tokens;
   $("#context-timeout").value = config.context.compression_timeout_seconds;
   const llm = config.llm || {};
-  const main = llm.main || {};
-  const vision = llm.vision || {};
-  $("#llm-main-model").value = main.model || "";
-  $("#llm-main-base-url").value = main.base_url || "";
-  setSecretInput($("#llm-main-api-key"), main.api_key);
-  $("#llm-vision-enabled").checked = Boolean(vision.enabled);
-  $("#llm-vision-model").value = vision.model || "";
-  $("#llm-vision-base-url").value = vision.base_url || "";
-  setSecretInput($("#llm-vision-api-key"), vision.api_key);
-  setVisionFieldsState();
+  state.modelsDraft = configuredModels(config).map((model) => ({ ...model, headers: model.headers ? { ...model.headers } : undefined }));
+  state.mainModelId = llm.main_model_id || state.modelsDraft[0]?.id || "";
+  state.visionModelId = llm.vision?.enabled ? (llm.vision_model_id || "legacy-vision") : "";
+  renderModelSettings();
   $("#settings-state").classList.remove("is-dirty");
   $("#settings-state").lastChild.textContent = "配置已同步";
   document
-    .querySelectorAll("#settings-config-page input, #settings-llm-page input")
+    .querySelectorAll("#settings-config-page input")
     .forEach((input) => {
       input.onchange = markConfigDirty;
       input.oninput = markConfigDirty;
@@ -1244,20 +1716,6 @@ function setSecretInput(input, value) {
       input.dataset.masked = "false";
     }
   };
-}
-
-function secretInputValue(selector) {
-  const input = $(selector);
-  return input.dataset.masked === "true" ? "" : input.value.trim();
-}
-
-function setVisionFieldsState() {
-  const enabled = $("#llm-vision-enabled").checked;
-  ["#llm-vision-model", "#llm-vision-base-url", "#llm-vision-api-key"].forEach(
-    (selector) => {
-      $(selector).disabled = !state.configReady || !enabled;
-    },
-  );
 }
 
 function toolIcon(name) {
@@ -1288,6 +1746,9 @@ function markConfigDirty() {
 }
 
 async function saveConfig() {
+  const main = state.modelsDraft.find((model) => model.id === state.mainModelId);
+  const vision = state.modelsDraft.find((model) => model.id === state.visionModelId);
+  if (!main) throw new Error("请添加并选择主模型");
   const tools = {};
   document.querySelectorAll("#settings-tools [data-tool]").forEach((row) => {
     tools[row.dataset.tool] = {
@@ -1297,21 +1758,16 @@ async function saveConfig() {
   });
   const payload = {
     llm: {
-      main: {
-        model: $("#llm-main-model").value.trim(),
-        base_url: $("#llm-main-base-url").value.trim(),
-        api_key: secretInputValue("#llm-main-api-key"),
-      },
-      vision: {
-        enabled: $("#llm-vision-enabled").checked,
-        model: $("#llm-vision-model").value.trim(),
-        base_url: $("#llm-vision-base-url").value.trim(),
-        api_key: secretInputValue("#llm-vision-api-key"),
-      },
+      main: { ...main },
+      vision: vision ? { ...vision, enabled: true } : { enabled: false, model: "", base_url: "", api_key: "" },
+      models: state.modelsDraft,
+      main_model_id: state.mainModelId,
+      vision_model_id: state.visionModelId,
     },
     tools,
     model: {
       stream: $("#model-stream").checked,
+      reasoning_summary: $("#model-reasoning-summary").checked,
     },
     tool_timeout: {
       default_seconds: Number($("#timeout-default").value),
@@ -1341,10 +1797,6 @@ function bindEvents() {
     button.addEventListener("click", () =>
       runSafely(async () => {
         const view = button.dataset.view || button.dataset.openView;
-        if (view === "workspace" && !state.activeRunId) {
-          await createRun();
-          return;
-        }
         if (view === "settings") switchSettingsPage(button.dataset.settingsPage);
         else switchView(view);
       }),
@@ -1354,8 +1806,14 @@ function bindEvents() {
     state.sidebarCollapsed = !state.sidebarCollapsed;
     applySidebarState();
   });
-  ["#new-run", "#home-new-run", "#home-start-button"].forEach((selector) => {
+  ["#new-run", "#home-new-run", "#home-start-button", "#workspace-new-run"].forEach((selector) => {
     $(selector).addEventListener("click", () => runSafely(createRun));
+  });
+  $("#template-create").addEventListener("click", () => runSafely(() => createRun("template")));
+  $("#templates-refresh").addEventListener("click", () => runSafely(loadTemplates));
+  $("#template-save-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    runSafely(saveActiveTemplate);
   });
   document.querySelectorAll(".inspector-tab").forEach((tab) => {
     tab.addEventListener("click", () => switchInspectorTab(tab.dataset.tab));
@@ -1401,7 +1859,25 @@ function bindEvents() {
   primaryAction.addEventListener("click", () => runSafely(handlePrimaryAction));
   $("#agent-select").addEventListener("change", (event) => {
     state.selectedAgentId = event.target.value;
+    state.selectedReasoningEffort = "";
+    renderReasoningSelector();
   });
+  $("#reasoning-effort").addEventListener("change", (event) => { state.selectedReasoningEffort = event.target.value; });
+  $("#model-add").addEventListener("click", () => openModelEditor());
+  $("#model-editor-close").addEventListener("click", closeModelEditor);
+  $("#model-editor").addEventListener("submit", (event) => { event.preventDefault(); runSafely(saveModelEditor); });
+  $("#model-detect").addEventListener("click", () => runSafely(detectModels));
+  $("#model-import").addEventListener("click", () => runSafely(importDetectedModels));
+  $("#model-header-add").addEventListener("click", () => addModelHeader());
+  $("#model-supports-reasoning").addEventListener("change", renderModelEfforts);
+  $("#model-discovery-all").addEventListener("change", (event) => {
+    document.querySelectorAll("#model-discovery-list input").forEach((input) => { input.checked = event.target.checked; });
+  });
+  ["#model-base-url", "#model-api-key", "#model-headers"].forEach((selector) => {
+    $(selector).addEventListener("input", () => { state.modelDiscovery = []; $("#model-discovery").hidden = true; });
+  });
+  $("#llm-main-select").addEventListener("change", (event) => { state.mainModelId = event.target.value; renderModelSettings(); markConfigDirty(); });
+  $("#llm-vision-select").addEventListener("change", (event) => { state.visionModelId = event.target.value; renderModelSettings(); markConfigDirty(); });
   $("#agent-add").addEventListener("click", () => openAgentEditor());
   $("#agent-editor-close").addEventListener("click", closeAgentEditor);
   $("#agent-form").addEventListener("submit", (event) => {
@@ -1430,10 +1906,6 @@ function bindEvents() {
     if (url) window.open(url, "_blank", "noopener,noreferrer");
   });
   $("#settings-save").addEventListener("click", () => runSafely(saveConfig));
-  $("#llm-vision-enabled").addEventListener("change", () => {
-    setVisionFieldsState();
-    markConfigDirty();
-  });
   document.querySelectorAll('input[name="appearance-theme"]').forEach((input) => {
     input.addEventListener("change", () => setTheme(input.value));
   });
@@ -1453,7 +1925,7 @@ function bindEvents() {
     const target = window.location.hash.slice(1);
     if (["settings", "settings/llm", "settings/style"].includes(target)) {
       switchSettingsPage(target === "settings" ? "config" : target.split("/")[1]);
-    } else if (["home", "workspace", "skills", "agents"].includes(target)) {
+    } else if (["home", "workspace", "templates", "skills", "agents"].includes(target)) {
       switchView(target);
     }
   });
@@ -1541,13 +2013,16 @@ async function initialize() {
     setConnection(false);
     showToast(error.message || "无法连接本地服务");
   }
-  if (["skills", "agents"].includes(target)) {
+  if (["skills", "agents", "templates"].includes(target)) {
     switchView(target);
   }
   if (["settings", "settings/llm", "settings/style"].includes(target)) {
     switchSettingsPage(target === "settings" ? "config" : target.split("/")[1]);
   }
-  if (target === "workspace" && state.runs[0]) await activateRun(state.runs[0].run_id);
+  if (target === "workspace") {
+    if (state.runs[0]) await activateRun(state.runs[0].run_id);
+    else switchView("workspace");
+  }
   if (["activity", "files", "instance"].includes(target) && state.runs[0]) {
     await activateRun(state.runs[0].run_id);
     setInspectorHidden(false);

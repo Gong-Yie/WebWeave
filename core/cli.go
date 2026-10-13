@@ -59,7 +59,7 @@ func (a *App) Chat(ctx context.Context, input io.Reader, output io.Writer, id st
 		if err != nil {
 			return err
 		}
-		if err := a.startMessage(id, content, "", nil, nil, false); err != nil {
+		if err := a.startMessage(id, content, "", nil, nil, false, nil); err != nil {
 			return err
 		}
 		run.mu.Lock()

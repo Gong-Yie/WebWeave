@@ -87,7 +87,7 @@ func assertStatus(t *testing.T, response *httptest.ResponseRecorder, expected in
 func useProvider(t *testing.T, app *App, address string, streaming bool) RuntimeConfig {
 	t.Helper()
 	cfg := defaultConfig()
-	cfg.LLM.Main = ProviderConfig{"test-model", address + "/v1", "test-key"}
+	cfg.LLM.Main = ProviderConfig{Model: "test-model", BaseURL: address + "/v1", APIKey: "test-key"}
 	cfg.Model.Stream = streaming
 	if err := workspace.WriteJSONAtomic(app.config.path, cfg); err != nil {
 		t.Fatal(err)
@@ -451,7 +451,7 @@ func TestModelRetryAndPermanentFailure(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 			useProvider(t, app, server.URL, false)
-			if err := app.startMessage(run.store.id, "重试任务", "", nil, nil, false); err != nil {
+			if err := app.startMessage(run.store.id, "重试任务", "", nil, nil, false, nil); err != nil {
 				t.Fatal(err)
 			}
 			awaitJob(t, jobDone(t, run))
@@ -499,7 +499,7 @@ func TestVisionAndCompression(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 			cfg := useProvider(t, app, server.URL, false)
-			cfg.LLM.Vision = VisionConfig{ProviderConfig{"vision-model", server.URL + "/v1", "vision-key"}, true}
+			cfg.LLM.Vision = VisionConfig{ProviderConfig{Model: "vision-model", BaseURL: server.URL + "/v1", APIKey: "vision-key"}, true}
 			cfg.Context.KeepRecentItems = 2
 			if err := workspace.WriteJSONAtomic(app.config.path, cfg); err != nil {
 				t.Fatal(err)

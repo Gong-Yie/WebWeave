@@ -46,10 +46,11 @@ type runSummary struct {
 
 type runDetail struct {
 	runSummary
-	State     runState        `json:"state"`
-	Events    []runEvent      `json:"events"`
-	Instance  *instanceRecord `json:"instance"`
-	JobActive bool            `json:"job_active"`
+	State        runState        `json:"state"`
+	Events       []runEvent      `json:"events"`
+	Instance     *instanceRecord `json:"instance"`
+	JobActive    bool            `json:"job_active"`
+	ContextUsage contextUsage    `json:"context_usage"`
 }
 
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -172,6 +173,13 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) (any, int, error
 	if path == "/api/agents" || strings.HasPrefix(path, "/api/agents/") {
 		return a.handleAgents(r)
 	}
+	if path == "/api/templates" && method == "GET" {
+		templates, err := a.listTemplates()
+		return map[string]any{"ok": true, "templates": templates}, 200, err
+	}
+	if path == "/api/models/discover" && method == "POST" {
+		return a.discoverModels(r)
+	}
 	switch path {
 	case "/api/health":
 		if method == "GET" {
@@ -210,6 +218,18 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) (any, int, error
 			return map[string]any{"ok": true, "runs": runs}, 200, err
 		}
 		if method == "POST" {
+			var request struct {
+				AgentID string `json:"agent_id"`
+			}
+			if r.ContentLength != 0 {
+				if err := readJSONBody(r, &request); err != nil {
+					return nil, 0, err
+				}
+			}
+			agent, err := findAgent(a.config.get().Agents, request.AgentID)
+			if err != nil {
+				return nil, 0, err
+			}
 			id := workspace.NewID()
 			if err := a.prepareDirectories(id); err != nil {
 				return nil, 0, err
@@ -219,6 +239,9 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) (any, int, error
 				return nil, 0, err
 			}
 			if err := run.store.setStatus("waiting", "新建对话"); err != nil {
+				return nil, 0, err
+			}
+			if err := run.store.selectAgent(agent); err != nil {
 				return nil, 0, err
 			}
 			detail, err := a.detail(id)
@@ -247,11 +270,21 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) (any, int, error
 		return nil, 0, apiError{404, "NOT_FOUND", "接口不存在"}
 	}
 	switch parts[3] {
+	case "template":
+		if method == "POST" {
+			var request templateSaveRequest
+			if err := readJSONBody(r, &request); err != nil {
+				return nil, 0, err
+			}
+			template, err := a.saveTemplate(id, request)
+			return map[string]any{"ok": true, "template": template}, 201, err
+		}
 	case "messages":
 		if method == "POST" {
 			var message struct {
 				Content         string   `json:"content"`
 				AgentID         string   `json:"agent_id"`
+				ReasoningEffort *string  `json:"reasoning_effort"`
 				Attachments     []string `json:"attachments"`
 				InstanceContext any      `json:"instance_context"`
 			}
@@ -273,7 +306,7 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) (any, int, error
 					return nil, 0, apiError{400, "INVALID_MESSAGE", "附件文件不存在"}
 				}
 			}
-			if err := a.startMessage(id, message.Content, message.AgentID, message.Attachments, message.InstanceContext, false); err != nil {
+			if err := a.startMessage(id, message.Content, message.AgentID, message.Attachments, message.InstanceContext, false, message.ReasoningEffort); err != nil {
 				return nil, 0, err
 			}
 			detail, err := a.detail(id)
@@ -282,14 +315,15 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) (any, int, error
 	case "continue":
 		if method == "POST" {
 			var message struct {
-				AgentID string `json:"agent_id"`
+				AgentID         string  `json:"agent_id"`
+				ReasoningEffort *string `json:"reasoning_effort"`
 			}
 			if r.ContentLength != 0 {
 				if err := readJSONBody(r, &message); err != nil {
 					return nil, 0, err
 				}
 			}
-			if err := a.startMessage(id, "", message.AgentID, nil, nil, true); err != nil {
+			if err := a.startMessage(id, "", message.AgentID, nil, nil, true, message.ReasoningEffort); err != nil {
 				return nil, 0, err
 			}
 			detail, err := a.detail(id)
@@ -408,7 +442,7 @@ func (a *App) detail(id string) (runDetail, error) {
 		copy.PreviewURL = previewURL(id)
 		instance = &copy
 	}
-	return runDetail{runSummary{id, title, status, state.UpdatedAt, state.EventCount, instance != nil}, state, events, instance, active}, nil
+	return runDetail{runSummary{id, title, status, state.UpdatedAt, state.EventCount, instance != nil}, state, events, instance, active, a.runContextUsage(events)}, nil
 }
 
 func (a *App) listRuns() ([]runSummary, error) {
