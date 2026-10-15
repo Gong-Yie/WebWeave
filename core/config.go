@@ -38,12 +38,23 @@ type VisionConfig struct {
 type ToolConfig = tools.Settings
 
 type ContextConfig struct {
-	Enabled          bool    `json:"enabled"`
-	MaxInputTokens   int     `json:"max_input_tokens"`
-	TriggerRatio     float64 `json:"compression_trigger_ratio"`
-	KeepRecentItems  int     `json:"keep_recent_items"`
-	SummaryMaxTokens int     `json:"summary_max_tokens"`
-	TimeoutSeconds   float64 `json:"compression_timeout_seconds"`
+	Enabled            bool                   `json:"enabled"`
+	MaxInputTokens     int                    `json:"max_input_tokens"`
+	TriggerRatio       float64                `json:"compression_trigger_ratio"`
+	KeepRecentItems    int                    `json:"keep_recent_items"`
+	SummaryMaxTokens   int                    `json:"summary_max_tokens"`
+	TimeoutSeconds     float64                `json:"compression_timeout_seconds"`
+	SummaryModelID     string                 `json:"summary_model_id,omitempty"`
+	SummaryInputTokens int                    `json:"summary_input_tokens"`
+	LocalCompression   LocalCompressionConfig `json:"local_compression"`
+}
+
+type LocalCompressionConfig struct {
+	Enabled bool    `json:"enabled"`
+	Python  string  `json:"python"`
+	Model   string  `json:"model"`
+	Device  string  `json:"device"`
+	Rate    float64 `json:"rate"`
 }
 
 type RuntimeConfig struct {
@@ -72,10 +83,10 @@ func defaultConfig() RuntimeConfig {
 	cfg.LLM.Main = ProviderConfig{Model: "deepseek-v4-flash", BaseURL: "https://api.deepseek.com"}
 	cfg.Model.Stream = true
 	cfg.ToolTimeout.DefaultSeconds, cfg.ToolTimeout.MaxSeconds = 120, 1800
-	cfg.Context = ContextConfig{true, 32768, 0.8, 12, 2000, 120}
+	cfg.Context = ContextConfig{Enabled: true, MaxInputTokens: 32768, TriggerRatio: 0.8, KeepRecentItems: 12, SummaryMaxTokens: 4096, TimeoutSeconds: 120, SummaryInputTokens: 8192, LocalCompression: LocalCompressionConfig{Python: "compression/.venv/Scripts/python.exe", Model: "microsoft/llmlingua-2-xlm-roberta-large-meetingbank", Device: "cuda", Rate: 0.7}}
 	cfg.Agents = defaultAgents()
 	cfg.Tools = map[string]ToolConfig{}
-	for _, name := range []string{"list_skills", "read_skill", "web_search", "create_file", "file_read", "terminal_run", "web_instance"} {
+	for _, name := range []string{"list_skills", "read_skill", "web_search", "create_file", "file_read", "read_context_segment", "terminal_run", "web_instance"} {
 		cfg.Tools[name] = ToolConfig{true, name != "list_skills" && name != "read_skill"}
 	}
 	return cfg
@@ -99,6 +110,9 @@ func parseConfig(data []byte) (RuntimeConfig, error) {
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
+	}
+	if _, ok := cfg.Tools["read_context_segment"]; !ok {
+		cfg.Tools["read_context_segment"] = ToolConfig{Enabled: true, RunScoped: true}
 	}
 	// Upgrade saved rosters without replacing edited roles or custom agents.
 	if _, err := findAgent(cfg.Agents, "template"); err != nil {
@@ -132,8 +146,12 @@ func parseConfig(data []byte) (RuntimeConfig, error) {
 	if cfg.ToolTimeout.MaxSeconds < cfg.ToolTimeout.DefaultSeconds {
 		return cfg, errors.New("最大超时不能小于默认超时")
 	}
-	if cfg.Context.TriggerRatio >= 1 || cfg.Context.MaxInputTokens < 1 || cfg.Context.KeepRecentItems < 1 || cfg.Context.SummaryMaxTokens < 1 {
+	if cfg.Context.TriggerRatio >= 1 || cfg.Context.MaxInputTokens < 1 || cfg.Context.KeepRecentItems < 1 || cfg.Context.SummaryMaxTokens < 1 || cfg.Context.SummaryInputTokens < 1 {
 		return cfg, errors.New("上下文参数无效：Token 和保留项目数必须为正整数，触发比例必须小于 1")
+	}
+	local := cfg.Context.LocalCompression
+	if math.IsNaN(local.Rate) || math.IsInf(local.Rate, 0) || local.Rate <= 0 || local.Rate > 1 || local.Enabled && (strings.TrimSpace(local.Python) == "" || strings.TrimSpace(local.Model) == "" || local.Device != "cpu" && local.Device != "cuda") {
+		return cfg, errors.New("本地压缩配置无效：须指定 Python、模型、cpu/cuda 设备及 (0,1] 保留比例")
 	}
 	return cfg, nil
 }
@@ -230,6 +248,24 @@ func (m *configManager) save(data []byte) (RuntimeConfig, error) {
 	// Older configuration clients must not reset saved custom agents.
 	if _, ok := object["agents"]; !ok {
 		object["agents"], _ = json.Marshal(m.config.Agents)
+		data, _ = json.Marshal(object)
+	}
+	if raw, ok := object["context"]; ok {
+		var contextObject map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &contextObject); err != nil {
+			return RuntimeConfig{}, err
+		}
+		previous, _ := json.Marshal(m.config.Context)
+		var previousObject map[string]json.RawMessage
+		_ = json.Unmarshal(previous, &previousObject)
+		for _, name := range []string{"summary_model_id", "summary_input_tokens", "local_compression"} {
+			if _, exists := contextObject[name]; !exists {
+				if value, exists := previousObject[name]; exists {
+					contextObject[name] = value
+				}
+			}
+		}
+		object["context"], _ = json.Marshal(contextObject)
 		data, _ = json.Marshal(object)
 	}
 	var llm map[string]json.RawMessage

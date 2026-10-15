@@ -64,9 +64,10 @@ func Definitions(settings map[string]Settings) []responses.ToolUnionParam {
 		{"read_skill", "读取指定 Skill 的完整指令，先使用 list_skills 获取名称", map[string]any{"name": stringProperty("Skill 名称")}, []string{"name"}},
 		{"create_file", "在当前运行的 result 目录创建或覆盖文本文件", map[string]any{"file_path": stringProperty("相对于当前结果目录的文件路径"), "content": stringProperty("完整文本内容")}, []string{"file_path", "content"}},
 		{"file_read", "读取当前运行 resources、result 或 download 内的文本文件；大文件按需读取，避免重复全文读取", map[string]any{"file_path": stringProperty("默认相对于当前 result 目录；也支持 data 下的项目路径、允许的绝对路径或 result/resources/download 下的路径"), "max_chars": map[string]any{"type": "integer", "minimum": 1, "maximum": 100000}}, []string{"file_path"}},
+		{"read_context_segment", "按片段 ID 回读当前运行已压缩的原文；修改源码或核对事实前按需读取", map[string]any{"segment_id": stringProperty("压缩结果提供的原文片段 ID"), "offset": map[string]any{"type": "integer", "minimum": 0}, "max_chars": map[string]any{"type": "integer", "minimum": 1, "maximum": 100000}}, []string{"segment_id"}},
 		{"web_search", "搜索公开网页，或将指定 URL 下载到当前运行 download 目录", map[string]any{"query": stringProperty("搜索关键词"), "download_url": stringProperty("http 或 https 下载地址"), "file_name": stringProperty("单个文件名，不含目录")}, []string{}},
 		{"terminal_run", "在当前运行的隔离工作目录执行 PowerShell 命令；Web 服务必须用 web_instance", map[string]any{"command": stringProperty("PowerShell 命令"), "cwd": stringProperty("工作目录，默认当前 result 目录"), "background": map[string]any{"type": "boolean"}}, []string{"command"}},
-		{"web_instance", "管理当前运行唯一的 Web 实例，支持 start、status、stop、restart", map[string]any{"action": map[string]any{"type": "string", "enum": []string{"start", "status", "stop", "restart"}}, "command": stringProperty("start 使用的命令，必须包含 {host} 和 {port}"), "cwd": stringProperty("相对于当前 result 目录的工作目录"), "port": map[string]any{"type": "integer", "minimum": 0, "maximum": 65535}, "health_path": stringProperty("站内健康检查路径，默认 /")}, []string{"action"}},
+		{"web_instance", "管理当前运行的多个 Web 实例；start 不传 instance_id 时新开实例；status 返回实例列表，stop/restart 用 instance_id 指定目标。不传启动参数时读取 webweave-start.json，显式参数保存到启动文件", map[string]any{"action": map[string]any{"type": "string", "enum": []string{"start", "status", "stop", "restart"}}, "instance_id": stringProperty("要查看、停止或重启的实例 ID；start 省略此字段时新开实例"), "command": stringProperty("start 使用的命令，必须包含 {host} 和 {port}；省略全部启动参数时读取启动文件"), "cwd": stringProperty("相对于当前 result 目录的工作目录"), "port": map[string]any{"type": "integer", "minimum": 0, "maximum": 65535}, "health_path": stringProperty("站内健康检查路径，默认 /")}, []string{"action"}},
 	}
 	sort.Slice(specs, func(i, j int) bool { return specs[i].Name < specs[j].Name })
 	definitions := []responses.ToolUnionParam{}
@@ -83,6 +84,9 @@ func Definitions(settings map[string]Settings) []responses.ToolUnionParam {
 }
 
 type Args struct {
+	InstanceID  string   `json:"instance_id"`
+	SegmentID   string   `json:"segment_id"`
+	Offset      int      `json:"offset"`
 	Timeout     *float64 `json:"timeout"`
 	FilePath    string   `json:"file_path"`
 	Content     *string  `json:"content"`
@@ -126,7 +130,7 @@ func (e *Executor) Execute(ctx context.Context, id, name, raw string, cfg Config
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
 		return "工具参数解析失败(" + name + "): " + err.Error()
 	}
-	if !settings.RunScoped && (name == "create_file" || name == "file_read" || name == "terminal_run" || name == "web_instance" || name == "web_search" && args.DownloadURL != "") {
+	if !settings.RunScoped && (name == "create_file" || name == "file_read" || name == "read_context_segment" || name == "terminal_run" || name == "web_instance" || name == "web_search" && args.DownloadURL != "") {
 		return "工具执行失败(" + name + "): 工具必须启用运行隔离才能访问当前运行目录"
 	}
 	timeout, err := ResolveTimeout(cfg, args.Timeout)
@@ -145,6 +149,8 @@ func (e *Executor) Execute(ctx context.Context, id, name, raw string, cfg Config
 		value, err = e.createFile(toolCtx, id, args)
 	case "file_read":
 		value, err = e.readFile(id, args)
+	case "read_context_segment":
+		value, err = e.readContextSegment(id, args)
 	case "web_search":
 		value, err = e.webSearch(toolCtx, id, args)
 	case "terminal_run":

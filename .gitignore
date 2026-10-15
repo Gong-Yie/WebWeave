@@ -3,3 +3,9 @@ web/
 __pycache__/
 /webweave.exe
 /webweave
+/compression/.venv/
+/data/compression/
+/data/result/*
+!/data/result/.gitkeep
+/data/run/*
+!/data/run/.gitkeep

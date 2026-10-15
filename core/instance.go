@@ -41,9 +41,10 @@ type instanceRecord struct {
 
 type instanceResult struct {
 	*instanceRecord
-	ProtocolVersion string     `json:"protocol_version"`
-	OK              bool       `json:"ok"`
-	Error           *errorBody `json:"error,omitempty"`
+	ProtocolVersion string            `json:"protocol_version"`
+	OK              bool              `json:"ok"`
+	Error           *errorBody        `json:"error,omitempty"`
+	Instances       []*instanceRecord `json:"instances,omitempty"`
 }
 
 type instanceError struct {
@@ -55,12 +56,38 @@ func (e instanceError) Error() string { return e.message }
 
 func previewURL(id string) string { return "/preview/" + url.PathEscape(id) + "/" }
 
+func instancePreviewURL(runID, instanceID string) string {
+	return previewURL(runID) + "_instances/" + url.PathEscape(instanceID) + "/"
+}
+
+func runInstances(state runState) []*instanceRecord {
+	if len(state.Instances) > 0 {
+		return state.Instances
+	}
+	if state.Instance != nil {
+		return []*instanceRecord{state.Instance}
+	}
+	return []*instanceRecord{}
+}
+
+func findInstance(state runState, id string) *instanceRecord {
+	if id == "" {
+		return state.Instance
+	}
+	for _, record := range runInstances(state) {
+		if record.InstanceID == id {
+			return record
+		}
+	}
+	return nil
+}
+
 func (a *App) instanceAlive(run *runRuntime, record *instanceRecord) bool {
 	if record.PID == nil || record.ProcessIdentity == nil {
 		return false
 	}
-	if run.process != nil && run.process.Cmd.Process.Pid == *record.PID {
-		return run.process.Alive()
+	if process := run.processes[record.InstanceID]; process != nil && process.Cmd.Process.Pid == *record.PID {
+		return process.Alive()
 	}
 	return *record.ProcessIdentity != "" && tools.ProcessIdentity(*record.PID) == *record.ProcessIdentity
 }
@@ -97,9 +124,36 @@ func (a *App) instanceAction(ctx context.Context, id string, args tools.Args) (i
 	if err != nil {
 		return instanceResult{}, err
 	}
-	record := state.Instance
+	record := findInstance(state, args.InstanceID)
+	if args.InstanceID != "" && record == nil {
+		return instanceResult{}, instanceError{"INSTANCE_NOT_FOUND", "当前运行不存在指定的 Web 实例", nil}
+	}
 	if args.Action == "" {
 		args.Action = "status"
+	}
+	if args.Action == "start" && args.Command == "" {
+		if args.Cwd != "" || args.Port != nil || args.HealthPath != "" {
+			return instanceResult{}, instanceError{"INVALID_ARGUMENT", "使用启动文件时不接受额外启动参数", record}
+		}
+		var config launchConfig
+		if args.InstanceID != "" {
+			relative, err := filepath.Rel(a.runRoot("result", id), record.Cwd)
+			if err != nil {
+				return instanceResult{}, err
+			}
+			config = launchConfig{record.Command, filepath.ToSlash(relative), record.RequestedPort, record.HealthPath}
+		} else {
+			config, err = a.prepareLaunchFiles(run, state.Instance)
+			if err != nil {
+				return instanceResult{}, err
+			}
+		}
+		instanceID := args.InstanceID
+		args, err = a.launchArgs(id, config)
+		if err != nil {
+			return instanceResult{}, err
+		}
+		args.InstanceID = instanceID
 	}
 	if args.Action != "start" && (args.Command != "" || args.Cwd != "" || args.Port != nil || args.HealthPath != "") {
 		return instanceResult{}, instanceError{"INVALID_ARGUMENT", "该操作不接受启动参数；restart 会复用原启动参数", record}
@@ -119,6 +173,9 @@ func (a *App) instanceAction(ctx context.Context, id string, args tools.Args) (i
 	}
 	switch args.Action {
 	case "start":
+		if args.InstanceID == "" {
+			record = nil
+		}
 		record, err = a.startInstance(ctx, run, args, record)
 	case "status":
 		if a.instanceAlive(run, record) {
@@ -152,8 +209,13 @@ func (a *App) instanceAction(ctx context.Context, id string, args tools.Args) (i
 		return instanceResult{}, err
 	}
 	copy := *record
-	copy.PreviewURL = previewURL(id)
+	copy.PreviewURL = instancePreviewURL(id, copy.InstanceID)
 	result := instanceResult{instanceRecord: &copy, ProtocolVersion: "1.0", OK: true}
+	updated, err := run.store.readState()
+	if err != nil {
+		return instanceResult{}, err
+	}
+	result.Instances = runInstances(updated)
 	if record.ErrorCode != nil {
 		result.Error = &errorBody{*record.ErrorCode, derefString(record.ErrorMessage)}
 	}
@@ -192,6 +254,13 @@ func (a *App) startInstance(ctx context.Context, run *runRuntime, args tools.Arg
 	if err != nil {
 		return nil, instanceError{"INVALID_ARGUMENT", err.Error(), previous}
 	}
+	relative, err := filepath.Rel(a.runRoot("result", run.store.id), cwd)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.writeLaunchFiles(run.store.id, launchConfig{args.Command, filepath.ToSlash(relative), port, healthPath}); err != nil {
+		return nil, err
+	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:"+strconv.Itoa(port))
 	if err != nil {
 		return nil, instanceError{"PORT_IN_USE", "端口不可用", previous}
@@ -202,21 +271,26 @@ func (a *App) startInstance(ctx context.Context, run *runRuntime, args tools.Arg
 	if previous != nil {
 		record.InstanceID, record.Revision = previous.InstanceID, previous.Revision+1
 	}
-	record.PreviewURL = previewURL(run.store.id)
-	record.LogPath = filepath.Join(run.store.dir, "instance", strconv.Itoa(record.Revision)+".log")
+	record.PreviewURL = instancePreviewURL(run.store.id, record.InstanceID)
+	record.LogPath = filepath.Join(run.store.dir, "instance", record.InstanceID, strconv.Itoa(record.Revision)+".log")
 	if err := persistInstance(run.store, record); err != nil {
 		return nil, err
 	}
 	command := strings.NewReplacer("{host}", record.Host, "{port}", strconv.Itoa(record.Port)).Replace(record.Command)
 	cmd, err := tools.ShellCommand(command, cwd)
+	var process *tools.Process
 	if err == nil {
 		cmd.Env = append(os.Environ(), "WEBWEAVE_INSTANCE_ID="+record.InstanceID)
-		run.process, err = tools.StartProcess(cmd, record.LogPath)
+		process, err = tools.StartProcess(cmd, record.LogPath)
 	}
 	if err != nil {
 		return nil, a.failedInstanceStart(run, record, "PROCESS_EXITED", err)
 	}
-	pid, identity := run.process.Cmd.Process.Pid, run.process.Identity
+	if run.processes == nil {
+		run.processes = make(map[string]*tools.Process)
+	}
+	run.processes[record.InstanceID] = process
+	pid, identity := process.Cmd.Process.Pid, process.Identity
 	record.PID, record.ProcessIdentity = &pid, &identity
 	if err := persistInstance(run.store, record); err != nil {
 		return nil, a.failedInstanceStart(run, record, "INTERNAL_ERROR", err)
@@ -227,7 +301,7 @@ func (a *App) startInstance(ctx context.Context, run *runRuntime, args tools.Arg
 	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if !run.process.Alive() {
+		if !process.Alive() {
 			return nil, a.failedInstanceStart(run, record, "PROCESS_EXITED", errors.New("Web 实例在就绪前退出"))
 		}
 		if healthy(ctx, record) {
@@ -247,9 +321,9 @@ func (a *App) startInstance(ctx context.Context, run *runRuntime, args tools.Arg
 }
 
 func (a *App) failedInstanceStart(run *runRuntime, record *instanceRecord, code string, cause error) error {
-	if run.process != nil {
+	if process := run.processes[record.InstanceID]; process != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*second)
-		cleanupErr := run.process.Stop(ctx)
+		cleanupErr := process.Stop(ctx)
 		cancel()
 		if cleanupErr != nil {
 			code = "STOP_FAILED"
@@ -275,8 +349,8 @@ func (a *App) stopInstance(ctx context.Context, run *runRuntime, record *instanc
 	}
 	if a.instanceAlive(run, record) {
 		var err error
-		if run.process != nil && run.process.Cmd.Process.Pid == *record.PID {
-			err = run.process.Stop(ctx)
+		if process := run.processes[record.InstanceID]; process != nil && process.Cmd.Process.Pid == *record.PID {
+			err = process.Stop(ctx)
 		} else {
 			err = tools.TerminateProcessTree(ctx, *record.PID)
 		}
@@ -288,6 +362,6 @@ func (a *App) stopInstance(ctx context.Context, run *runRuntime, record *instanc
 		}
 	}
 	record.Status, record.PID, record.ProcessIdentity = "stopped", nil, nil
-	run.process = nil
+	delete(run.processes, record.InstanceID)
 	return persistInstance(run.store, record)
 }

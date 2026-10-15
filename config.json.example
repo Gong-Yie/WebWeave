@@ -34,6 +34,10 @@
       "enabled": true,
       "run_scoped": true
     },
+    "read_context_segment": {
+      "enabled": true,
+      "run_scoped": true
+    },
     "terminal_run": {
       "enabled": true,
       "run_scoped": true
@@ -56,7 +60,16 @@
     "max_input_tokens": 65536,
     "compression_trigger_ratio": 0.8,
     "keep_recent_items": 12,
-    "summary_max_tokens": 2000,
-    "compression_timeout_seconds": 120.0
+    "summary_max_tokens": 4096,
+    "summary_input_tokens": 8192,
+    "summary_model_id": "",
+    "compression_timeout_seconds": 120.0,
+    "local_compression": {
+      "enabled": false,
+      "python": "compression/.venv/Scripts/python.exe",
+      "model": "microsoft/llmlingua-2-xlm-roberta-large-meetingbank",
+      "device": "cuda",
+      "rate": 0.7
+    }
   }
 }

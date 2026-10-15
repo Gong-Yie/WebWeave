@@ -31,7 +31,7 @@ var errModelRedirect = errors.New("模型接口返回重定向，请检查 Base 
 const systemPrompt = `你是一个“网页项目生成型 Agent”，使用完整的 ReAct 工作循环解决用户任务。
 理解用户需求，按需读取当前运行 ID 的资源，检索必要资料，把最终文件写入当前运行 ID 的结果目录。
 当前运行 ID：{run_id}。
-可用工具：list_skills、read_skill、file_read、web_search、create_file、terminal_run、web_instance。
+可用工具：list_skills、read_skill、file_read、read_context_segment、web_search、create_file、terminal_run、web_instance。
 先分析目标和上下文，再按需调用工具；需要事实、源码或已有产物时先读取文件，需要外部资料时搜索网页。
 写文件前确认路径和完整内容；以实际工具返回结果为准。所有生成网站的内容默认使用中文。
 每次工具调用必须填写 timeout（秒），默认 {timeout_default} 秒，最大 {timeout_max} 秒。
@@ -40,12 +40,15 @@ const systemPrompt = `你是一个“网页项目生成型 Agent”，使用完�
 执行节奏：先完成核心页面并启动预览，再检查影响使用的缺陷。用户未明确要求多页面时，优先交付完整单页网站，不自行扩大项目范围。
 不要用长篇设计文档、重复验证或反复全文读取代替交付。已生成源码以文件为准，修改时读取相关片段；终端检查只输出必要结论和证据。
 检查通过后停止该项检查；只修复有证据且影响交付的问题，不为轻微风格问题反复委派审计。
+压缩观察仅是预览。需要精确源码、错误或历史事实时，先用 read_context_segment 回读原文；修改源码前读取实际文件。
 安全边界：只能读取当前运行的 data/resources/{run_id}、data/result/{run_id}、data/download/{run_id}。
 只能通过 create_file 写入当前运行 result 目录，通过 web_search 下载到当前运行 download 目录。
 terminal_run 的 cwd 必须在当前运行的 resources、result 或 download 目录内。
 Web 服务必须通过 web_instance 启动，不得使用 terminal_run 后台模式代替实例注册。
-web_instance 只能从当前运行 result 目录启动，每个运行同时只能有一个活动实例。
-web_instance start 的 command 必须包含 {host} 和 {port}；port=0 自动分配端口，restart 复用启动参数。
+web_instance 只能从当前运行 result 目录启动，同一运行可同时启动多个独立实例。保存每次返回的 instance_id，查看、停止和重启时必须指定目标 instance_id；status 返回 instances 列表。不同实例有独立端口、日志和预览地址。
+每次交付可运行网页前，必须在 result 根目录创建 webweave-start.json，字段为 command（PowerShell 命令，包含 {host} 和 {port}）、cwd（相对于 result 的项目目录）、port（0 自动分配）、health_path（默认 /）。例如 {"command":"python -m http.server {port} --bind {host}","cwd":".","port":0,"health_path":"/"}；使用项目真实可用的启动命令，不要为动态项目套用静态服务器。
+系统在每次执行结束时生成 start-webweave.ps1，用户可在实例页手动启动，也可在项目目录用 PowerShell 执行该脚本。启动文件始终放在 result 根目录，不放进只有三个文件的模板子目录。
+web_instance start 不传 instance_id 时新开实例，可以只传 action=start 读取启动文件，也可以传包含 {host} 和 {port} 的 command；显式启动参数自动保存到启动文件。port=0 自动分配端口，避免多个实例占用同一固定端口；restart 只重启指定实例并复用其参数。已有实例可用时直接复用，不重复启动。
 配置及本地 SKILL 文件会重新读取；Go 工具源码修改后需要重新编译。`
 
 func jsonBytes(value any) ([]byte, error) { return json.Marshal(value) }
@@ -73,16 +76,30 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 		}
 		templateSkill = "\n\n默认 Skill：template-maker\n" + document.Instructions
 	}
-	items = compactModelContext(repairItems(items))
+	items = repairItems(items)
 	if err := saveAgentContext(ctx, store, items, nil); err != nil {
 		return "", err
 	}
 	limit := agentRoundLimit(agent.ID)
+	var compressionErr error
+	localCompressionFailed := false
 	for round := 0; ; round++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 		cfg := a.config.get()
+		var err error
+		compactCfg := cfg
+		if localCompressionFailed {
+			compactCfg.Context.LocalCompression.Enabled = false
+		}
+		items, err = a.compactAgentContext(ctx, store, items, compactCfg)
+		if err != nil {
+			if !errors.Is(err, errContextCompression) {
+				return "", err
+			}
+			localCompressionFailed = true
+		}
 		provider, err := providerForAgent(cfg, agent)
 		if err != nil {
 			return "", err
@@ -97,13 +114,6 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 		client, err := newClient(provider)
 		if err != nil {
 			return "", err
-		}
-		if cfg.Context.Enabled && estimateTokens(items) >= int(float64(cfg.Context.MaxInputTokens)*cfg.Context.TriggerRatio) {
-			cfg.LLM.Main = provider
-			items, err = a.compressContext(ctx, client, store, items, cfg)
-			if err != nil {
-				return "", err
-			}
 		}
 		params := responses.ResponseNewParams{Model: provider.Model, Instructions: openai.String(agentInstructions(agent, cfg, store.id) + templateSkill), Tools: agentTools(agent, cfg)}
 		if len(provider.ReasoningEfforts) == 0 {
@@ -123,7 +133,25 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 				return "", err
 			}
 		}
-		if err := appendAgentEvent(ctx, store, "context_usage", map[string]any{"input_tokens": estimateRequestTokens(params, items), "estimated": true}); err != nil {
+		if cfg.Context.Enabled && compressionErr == nil && estimateRequestTokens(params, items) >= int(float64(cfg.Context.MaxInputTokens)*cfg.Context.TriggerRatio) {
+			cfg.LLM.Main = provider
+			items, err = a.compressContext(ctx, client, store, items, cfg)
+			if err != nil {
+				if !errors.Is(err, errContextCompression) {
+					return "", err
+				}
+				// Keep the history and avoid repeating a failed compression each round.
+				compressionErr = err
+			}
+		}
+		inputTokens := estimateRequestTokens(params, items)
+		if cfg.Context.Enabled && inputTokens > cfg.Context.MaxInputTokens {
+			if compressionErr != nil {
+				return "", fmt.Errorf("上下文估算输入 %d Token 超过输入预算 %d，原上下文已保留；调整模型或压缩配置后继续: %w", inputTokens, cfg.Context.MaxInputTokens, compressionErr)
+			}
+			return "", fmt.Errorf("压缩后上下文估算输入 %d Token 仍超过输入预算 %d，无法继续请求模型", inputTokens, cfg.Context.MaxInputTokens)
+		}
+		if err := appendAgentEvent(ctx, store, "context_usage", map[string]any{"input_tokens": inputTokens, "estimated": true}); err != nil {
 			return "", err
 		}
 		response, err := modelResponse(ctx, client, params, items, cfg.Model.Stream, store)
@@ -192,7 +220,6 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 			if err := appendAgentEvent(ctx, store, "tool_output", map[string]any{"tool_name": name, "arguments": arguments, "duration_seconds": time.Since(started).Seconds(), "cancelled": cancelled, "item": item}); err != nil {
 				return "", err
 			}
-			items = compactModelContext(items)
 			if err := saveAgentContext(ctx, store, items, nil); err != nil {
 				return "", err
 			}
@@ -210,7 +237,7 @@ func modelResponse(ctx context.Context, client openai.Client, params responses.R
 			return nil, ctx.Err()
 		}
 		if !retryableModelError(err) || attempt == 5 {
-			return nil, err
+			return response, err
 		}
 		delay := time.Duration(min(1<<(attempt-1), 8)) * time.Second
 		if store != nil {
@@ -320,6 +347,11 @@ func requestResponse(ctx context.Context, client openai.Client, params responses
 			if err := flush(); err != nil {
 				return nil, err
 			}
+			if event.Type != "error" {
+				response := event.Response
+				response.Status = responses.ResponseStatus(strings.TrimPrefix(event.Type, "response."))
+				return validateResponse(&response)
+			}
 			return nil, fmt.Errorf("模型响应未完成: %s %s", event.Type, event.Message)
 		}
 	}
@@ -339,8 +371,11 @@ func requestResponse(ctx context.Context, client openai.Client, params responses
 }
 
 func validateResponse(response *responses.Response) (*responses.Response, error) {
-	if response == nil || response.Status == "failed" || response.Status == "incomplete" {
-		return nil, errors.New("模型未返回完整响应")
+	if response == nil {
+		return nil, errors.New("模型返回空响应")
+	}
+	if response.Status == "failed" || response.Status == "incomplete" {
+		return response, fmt.Errorf("模型响应未完成: status=%s reason=%s error_code=%s output_tokens=%d reasoning_tokens=%d", response.Status, response.IncompleteDetails.Reason, response.Error.Code, response.Usage.OutputTokens, response.Usage.OutputTokensDetails.ReasoningTokens)
 	}
 	return response, nil
 }
@@ -353,7 +388,8 @@ func estimateTokens(items []inputItem) int {
 // Includes the instructions and tool schemas sent alongside conversation items.
 func estimateRequestTokens(params responses.ResponseNewParams, items []inputItem) int {
 	data, _ := json.Marshal(params.Tools)
-	return estimateTokens(items) + (utf8.RuneCountInString(params.Instructions.Value)+utf8.RuneCount(data)+1)/2
+	format, _ := json.Marshal(params.Text)
+	return estimateTokens(items) + (utf8.RuneCountInString(params.Instructions.Value)+utf8.RuneCount(data)+utf8.RuneCount(format)+1)/2
 }
 
 func (a *App) prepareUserItem(ctx context.Context, id, text string, attachments []string) (inputItem, error) {

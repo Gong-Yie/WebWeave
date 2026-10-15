@@ -116,6 +116,11 @@ func validateModelConfig(cfg *RuntimeConfig) error {
 			}
 		}
 	}
+	if cfg.Context.SummaryModelID != "" {
+		if _, err := findModel(cfg.LLM.Models, cfg.Context.SummaryModelID); err != nil {
+			return fmt.Errorf("摘要模型: %w", err)
+		}
+	}
 	return nil
 }
 

@@ -26,7 +26,7 @@ type runRuntime struct {
 	instanceMu sync.Mutex
 	store      *runStore
 	job        *runJob
-	process    *tools.Process
+	processes  map[string]*tools.Process
 }
 
 // App owns the local workspace, background jobs and per-run persistence locks.
@@ -35,6 +35,8 @@ type App struct {
 	config       *configManager
 	skills       *skills.Loader
 	tools        *tools.Executor
+	python       *pythonCompressor
+	compressText func(context.Context, LocalCompressionConfig, string) (localCompressionResult, error)
 	runs         sync.Map
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -54,6 +56,8 @@ func New(root string) (*App, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	app := &App{root: resolved, config: newConfigManager(resolved), ctx: ctx, cancel: cancel}
+	app.python = newPythonCompressor(ctx, resolved)
+	app.compressText = app.python.Compress
 	app.skills = skills.NewLoader(filepath.Join(resolved, "data", "skills"))
 	app.tools = tools.NewExecutor(resolved, app.skills, func(ctx context.Context, id string, args tools.Args) (any, error) {
 		return app.instanceAction(ctx, id, args)
@@ -86,13 +90,14 @@ func (a *App) active(id string) bool {
 func (a *App) Close() {
 	a.cancel()
 	a.wg.Wait()
+	a.python.Close()
 	a.runs.Range(func(key, value any) bool {
 		run := value.(*runRuntime)
 		run.instanceMu.Lock()
-		if run.process != nil {
+		for instanceID, process := range run.processes {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*second)
-			if err := run.process.Stop(ctx); err != nil {
-				slog.Error("清理实例进程失败", "run_id", key, "error", err)
+			if err := process.Stop(ctx); err != nil {
+				slog.Error("清理实例进程失败", "run_id", key, "instance_id", instanceID, "error", err)
 			}
 			cancel()
 		}
@@ -204,6 +209,12 @@ func (a *App) startMessage(id, content, agentID string, attachments []string, in
 		}
 		if jobErr == nil {
 			_, jobErr = a.runAgent(ctx, run.store, items, agent, false)
+		}
+		if err := a.ensureLaunchFiles(run); err != nil {
+			jobErr = errors.Join(jobErr, fmt.Errorf("生成启动文件失败: %w", err))
+			if ctx.Err() != nil {
+				slog.Error("生成启动文件失败", "run_id", id, "error", err)
+			}
 		}
 		run.mu.Lock()
 		defer run.mu.Unlock()

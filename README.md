@@ -115,13 +115,14 @@ Agent 使用 ReAct 循环理解需求，并按需调用工具完成任务。每�
 
 系统默认提供主Agent、网站灵感设计Agent、代码编程Agent、代码审计Agent和前端模板制作Agent。在左侧“Agent 管理”中可编辑角色指令、添加自定义 Agent 和删除自定义 Agent。主 Agent 使用模型配置页选择的主模型；子 Agent 的 `model_id` 留空时继承主模型，也可以选择模型列表中的独立配置。定义保存在 `config.json` 的 `agents` 数组。旧配置会自动补充前端模板制作 Agent，保留已编辑的角色及自定义 Agent。
 
-工作台输入框下方的下拉框默认选择主Agent，可以切换本次任务的执行 Agent。重新打开对话会恢复上次执行的 Agent，停止后继续也会保留选择。主 Agent 可通过 `call_agent` 调用所有专业及自定义 Agent；每次委派都是具有独立 ID 和上下文的子 Agent 任务，共享当前运行的文件目录，结果返回主 Agent 后由它继续处理。当前对话的侧栏展示子 Agent 的任务、当前活动以及完成、失败或中断状态，点击可定位对应记录。对话与工具记录显示实际执行的 Agent。默认 Agent 可以编辑，不能删除。
+工作台输入框下方的下拉框默认选择主Agent，可以切换本次任务的执行 Agent。重新打开对话会恢复上次执行的 Agent，停止后继续也会保留选择。主 Agent 可通过 `call_agent` 调用所有专业及自定义 Agent；每次委派都是具有独立 ID 和上下文的子 Agent 任务，共享当前运行的文件目录，结果返回主 Agent 后由它继续处理。主对话只展示委派入口，子 Agent 的任务、思考、工具调用和回复在右侧“子 Agent”页签内按每次委派分开展示；点击主对话的委派卡片或历史侧栏的子 Agent 可打开对应会话，运行中的新委派会自动展开。会话支持切换查看，重新打开历史对话时恢复记录，并显示完成、失败或中断状态。对话与工具记录显示实际执行的 Agent。默认 Agent 可以编辑，不能删除。
 
 当前内置工具包括：
 
 - `list_skills`、`read_skill`：发现并读取本地 Skill
 - `web_search`：检索网页资料并下载文件
 - `file_read`、`create_file`：读取输入和生成结果文件
+- `read_context_segment`：按片段 ID 和字符偏移回读已压缩记录的原文
 - `terminal_run`：在当前运行目录执行 PowerShell 命令
 - `web_instance`：启动、查看、停止和重启生成的网页实例
 
@@ -156,6 +157,25 @@ Agent 生成网页后，可以通过实例面板直接查看本地预览。检�
 - 桌面、平板和手机尺寸切换
 - 同源 HTTP/WebSocket 预览代理
 - 实例刷新、重启、停止和新窗口打开
+- 同一对话可同时运行多个实例，在实例页顶部的标签间切换；每个实例拥有独立进程、端口、日志和预览地址
+
+每次任务结束（包括失败或停止）都会在当前运行的 `data/result/{运行ID}` 根目录生成 `webweave-start.json` 和 `start-webweave.ps1`。Agent 通过 `web_instance start` 显式启动时会自动保存启动参数；未自动启动时，Agent 应提供以下启动配置，`cwd` 相对于当前 result 目录，`command` 必须包含 `{host}` 和 `{port}`：
+
+```json
+{"command":"python -m http.server {port} --bind {host}","cwd":".","port":0,"health_path":"/"}
+```
+
+上例用于已安装 Python 的静态网页，动态项目应使用自身的启动命令。实例页的“手动启动 / 新开实例”按钮读取启动配置并新增独立实例，保留已运行实例。停止和重启仅作用于当前选中的实例；停止后的实例可通过重启按钮再次运行。Agent 调用 `web_instance start` 时省略 `instance_id` 新开实例，提供 `instance_id` 则启动该已停止实例；`status` 返回 `instances` 列表，`stop` / `restart` 应携带目标 `instance_id`，省略时兼容操作最近新建的实例。多个实例应使用 `port=0` 自动分配端口，固定端口被占用时会报错。
+
+旧的单实例记录和 `/preview/{运行ID}/` 地址继续兼容，新实例预览地址携带实例 ID，防止切换实例后旧预览指向其他进程。历史实例首次手动启动时从原实例记录补齐启动文件；尚无启动命令的任务会明确提示补齐配置，不会猜测启动方式。启动文件位于 result 根目录，不改变模板子目录的三文件约束。
+
+也可以在该运行的 result 根目录自行执行（脚本直接运行项目，不注册到 WebUI；可用 Ctrl+C 停止）：
+
+```powershell
+& .\start-webweave.ps1
+# 可选：指定端口；默认按配置启动，port=0 自动分配本机端口。
+& .\start-webweave.ps1 -Port 3000
+```
 
 ### 5. 文件树与结果预览
 
@@ -175,9 +195,35 @@ Agent 生成网页后，可以通过实例面板直接查看本地预览。检�
 
 ### 7. 上下文压缩与热加载
 
-模型上下文会缩短大型工具结果（正文预览最多 12,000 字符）和已成功写入的大型文件内容；完整结果仍保存在 `events.jsonl`，源码保存在结果文件中。压缩请求的历史片段限制为 24,000 字符，保留最初需求、最近用户消息和完整工具调用配对。压缩失败时保留原需求及已有摘要，并在 `context_compressed.compression_error` 中记录原因。后续保存上下文会继续保留摘要元数据。
+上下文采用分层压缩：当前需求与近期完整交互原样保留，较旧的大型观察和已成功写入的大型源码保存到 `data/run/{运行ID}/context_segments/{内容哈希}.json`。模型预览保留文件路径、退出码等精确字段，并提供原文片段 ID；需要精确内容时用 `read_context_segment`，通过 `offset`、`max_chars` 分页回读。重复内容复用已保存的压缩结果，内容、模型或保留比例变化后重新压缩。源码和失败命令的关键异常不进入 Token 删除模型。
 
-配置模板的 `context.max_input_tokens` 为 65,536。输入框下面的圆环显示最近一次模型请求的输入 Token 与压缩阈值（`max_input_tokens × compression_trigger_ratio`），包括子 Agent 请求，并在提示中标明执行者。接口返回 `usage.input_tokens` 时显示 API 值，否则显示包含对话、角色指令及工具定义的估算值。压缩判断仍使用现有的对话项目估算；图片及供应商分词差异使估算值不能作为精确计费依据。`file_read` 的普通相对路径默认指向当前运行的 result 目录，也支持显式 scope、项目 `data` 路径和允许的绝对路径。
+可选的 `context.local_compression` 使用常驻 Python 进程运行 LLMLingua-2。只压缩旧的 `.md`、`.txt` 文件内容和搜索结果中的标题、摘要；JSON 外壳、源码及精确工具字段不进入压缩器。Markdown 围栏代码块及包含数字、链接、源码文件名或明确否定/约束词的文本行保持原样。无法缩减的受保护内容保持原文并记录 `context_segment_compression_skipped`；本地压缩失败则记录 `context_segment_compression_failed`，同次执行不再重试本地模型。完整工具结果同时保留在 `events.jsonl`。
+
+任务记忆由独立的摘要请求维护。`summary_model_id` 可选择模型列表中的独立模型，留空时跟随当前 Agent；DeepSeek 摘要请求显式使用 `reasoning.effort=none`，并通过 JSON Schema 约束输出。默认每批输入预算 `summary_input_tokens=8192`、输出预算 `summary_max_tokens=4096`。完整工具交互优先保持在同一批，超大轮次按连续片段处理，不删除中间记录；每批携带上一批摘要。摘要读取原始资料，避免对 LLMLingua 的有损结果再次总结；大型源码和旧的成功终端输出以原文引用代替，失败证据仍保留。
+
+摘要失败不裁剪历史，也不替换已有摘要；`context_compression_failed` 记录阶段、错误、已完成批次数，以及接口返回的状态、未完成原因和输出 Token 用量。同次消息或委派中，失败后不再逐轮重试摘要；输入估算未超过 `max_input_tokens` 时保留原上下文继续，超过预算则明确结束执行。调整模型或压缩配置后可继续。既有运行记录格式仍兼容。
+
+配置模板的 `context.max_input_tokens` 为 65,536。输入框下面的圆环显示最近一次模型请求的输入 Token 与压缩阈值（`max_input_tokens × compression_trigger_ratio`），包括子 Agent 请求，并在提示中标明执行者。接口返回 `usage.input_tokens` 时显示 API 值，否则显示包含对话、角色指令及工具定义的估算值。压缩触发和输入预算检查同样包含对话、角色指令及工具定义；图片及供应商分词差异使估算值不能作为精确计费依据。`file_read` 的普通相对路径默认指向当前运行的 result 目录，也支持显式 scope、项目 `data` 路径和允许的绝对路径。
+
+本地压缩默认关闭，不影响仅安装 Go 的启动方式。Windows GPU 环境可在项目根目录安装专用虚拟环境（以下 CUDA 12.8 组合已在 RTX 4060 Laptop 上验证）：
+
+```powershell
+python -m venv compression/.venv
+& compression/.venv/Scripts/python.exe -m pip install 'torch==2.11.0+cu128' --index-url https://download.pytorch.org/whl/cu128
+& compression/.venv/Scripts/python.exe -m pip install -r compression/requirements.txt
+& compression/.venv/Scripts/python.exe -X utf8 compression/evaluate.py --output data/compression/evaluation.json
+```
+
+首次评测会下载模型权重。准备完成后在“运行配置”启用本地资料压缩，默认使用 `microsoft/llmlingua-2-xlm-roberta-large-meetingbank`、`cuda` 和 0.7 保留比例；CPU 或其他操作系统需调整设备和 Python 路径。应用按需启动进程并在退出时清理，诊断日志位于 `data/compression/worker.log`。模型和虚拟环境不进入版本控制。评测报告的 Token 计数使用 `cl100k_base` 作为代理，不等同于 DeepSeek 计费；固定中英文样例用于检查缩减和精确字段保留，不代表长任务成功率。
+
+回归测试：
+
+```powershell
+go test ./...
+& compression/.venv/Scripts/python.exe -m unittest discover -s compression -p 'test_*.py'
+```
+
+离线压缩评测报告写入 `data/compression`，不进入版本控制，也不代表完整网页任务完成率。
 
 ### 前端模板库
 
@@ -191,7 +237,7 @@ Agent 生成网页后，可以通过实例面板直接查看本地预览。检�
 
 ### 8. 从 Python 后端迁移
 
-后端不再需要 Python。已有 `config.json`、`data/run/{运行ID}/state.json`、`events.jsonl`、`context.json` 和资源目录可继续使用，前端 API 路径保持一致。停止旧 Python 服务后再启动 Go 服务，以避免端口占用和两个进程同时修改运行数据。
+后端由 Go 运行；启用可选的 LLMLingua-2 本地资料压缩时需要专用 Python 环境。已有 `config.json`、`data/run/{运行ID}/state.json`、`events.jsonl`、`context.json` 和资源目录可继续使用，前端 API 路径保持一致。停止旧 Python 后端服务后再启动 Go 服务，以避免端口占用和两个进程同时修改运行数据。
 
 旧对话恢复时会移除未配对的工具调用与结果。已经退出的历史实例需要重新启动；如果原启动命令本身使用 Python，则该生成项目仍需要 Python，这与 WebWeave 后端运行时无关。
 
@@ -349,6 +395,7 @@ WebUI 同时提供用于前端和自动化集成的本地 API：
 | `GET` / `POST` | `/api/agents` | 列出 Agent 或添加自定义 Agent |
 | `PUT` / `DELETE` | `/api/agents/{agent_id}` | 编辑 Agent 或删除自定义 Agent |
 | `GET` / `POST` | `/api/runs` | 列出或创建对话 |
+| `POST` | `/api/runs/{run_id}/instance` | `start` 读取项目启动文件；也支持 `status`、`stop`、`restart` |
 | `GET` | `/api/templates` | 获取已确认入库的前端模板 |
 | `POST` | `/api/models/discover` | 使用指定或已保存的接口凭据识别模型列表 |
 | `POST` | `/api/runs/{run_id}/template` | 用户确认后保存已完成的模板，传入 `name` 和 `approved: true` |

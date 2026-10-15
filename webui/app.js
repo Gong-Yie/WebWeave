@@ -36,6 +36,10 @@ const state = {
   runFiles: [],
   templates: [],
   reasoningOpen: new Map(),
+  selectedSubagentId: null,
+  knownSubagentIds: null,
+  instanceBusy: false,
+  selectedInstanceId: null,
   appearance: {
     theme: localStorage.getItem("webweave-theme") || "system",
     backgroundUrl: "",
@@ -349,8 +353,7 @@ function renderRuns() {
           child.append(copy, element("span", "subagent-status", statusLabel(task.status)));
           child.addEventListener("click", () => {
             switchView("workspace");
-            const message = Array.from(document.querySelectorAll("[data-subagent-id]")).find((node) => node.dataset.subagentId === task.id);
-            if (message) message.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth", block: "center" });
+            openSubagent(task.id);
           });
           tree.append(child);
         });
@@ -496,6 +499,9 @@ async function createRun(agentId = "main") {
 
 async function activateRun(runId) {
   state.activeRunId = runId;
+  state.selectedInstanceId = null;
+  state.selectedSubagentId = null;
+  state.knownSubagentIds = null;
   state.runFiles = [];
   state.renderedRunKey = "";
   state.frameKey = "";
@@ -532,10 +538,11 @@ async function loadActiveRun(force = false) {
   ].join(":");
   renderRunHeader(payload.run);
   updateActionFromRun(payload.run);
-  renderInstance(payload.run.instance);
+  renderInstances(payload.run);
   if (force || key !== state.renderedRunKey) {
     state.renderedRunKey = key;
     renderConversation(payload.run);
+    renderSubagents(payload.run);
     renderActivity(payload.run);
     await loadFiles();
     await loadRuns();
@@ -605,6 +612,79 @@ function collectSubagents(run) {
     }
   }
   return [...tasks.values()];
+}
+
+function openSubagent(taskId) {
+  if (!state.activeRun) return;
+  state.selectedSubagentId = taskId;
+  setInspectorHidden(false);
+  switchInspectorTab("subagents");
+  renderSubagents(state.activeRun);
+}
+
+function renderSubagents(run) {
+  const tasks = collectSubagents(run);
+  const newest = tasks.findLast((task) => task.status === "running" && !state.knownSubagentIds?.has(task.id));
+  const shouldOpen = newest && (state.knownSubagentIds !== null || run.job_active);
+  state.knownSubagentIds = new Set(tasks.map((task) => task.id));
+  if (shouldOpen) state.selectedSubagentId = newest.id;
+  if (!tasks.some((task) => task.id === state.selectedSubagentId)) {
+    state.selectedSubagentId = tasks.at(-1)?.id || null;
+  }
+  if (shouldOpen) {
+    setInspectorHidden(false);
+    switchInspectorTab("subagents");
+  }
+  $("#subagent-count").textContent = String(tasks.length);
+  $("#subagent-empty").hidden = tasks.length > 0;
+  $("#subagent-session").hidden = tasks.length === 0;
+  const sessions = $("#subagent-sessions");
+  const previousSessionScroll = sessions.scrollLeft;
+  const focusedSession = sessions.contains(document.activeElement) ? document.activeElement.id : null;
+  sessions.replaceChildren();
+  tasks.forEach((task, index) => {
+    const button = element("button", "subagent-session-tab");
+    button.type = "button";
+    button.id = `subagent-tab-${task.id}`;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(task.id === state.selectedSubagentId));
+    button.setAttribute("aria-controls", "subagent-conversation");
+    button.dataset.status = task.status;
+    button.title = task.task;
+    button.append(element("span", "subagent-dot"), document.createTextNode(`${task.name} · ${index + 1}`));
+    button.addEventListener("click", () => openSubagent(task.id));
+    sessions.append(button);
+  });
+  sessions.scrollLeft = previousSessionScroll;
+  if (focusedSession) document.getElementById(focusedSession)?.focus({ preventScroll: true });
+  if (shouldOpen) document.getElementById(`subagent-tab-${state.selectedSubagentId}`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  const selected = tasks.find((task) => task.id === state.selectedSubagentId);
+  if (selected) {
+    $("#subagent-name").textContent = selected.name;
+    const badge = $("#subagent-session-status");
+    badge.textContent = statusLabel(selected.status);
+    badge.dataset.status = selected.status;
+    $("#subagent-conversation").setAttribute("aria-labelledby", `subagent-tab-${selected.id}`);
+    renderConversation(run, selected);
+  } else {
+    $("#subagent-conversation").replaceChildren();
+  }
+  refreshIcons();
+}
+
+function createSubagentCard(task) {
+  const card = element("button", "subagent-task-card");
+  card.type = "button";
+  card.dataset.status = task.status;
+  card.append(icon("messages-square"));
+  const copy = element("span", "subagent-task-copy");
+  copy.append(element("strong", "", task.name), element("small", "", task.task));
+  const status = element("span", "subagent-task-status");
+  status.append(element("span", "subagent-dot"), document.createTextNode(statusLabel(task.status)));
+  card.append(copy, status, icon("chevron-right"));
+  card.setAttribute("aria-label", `打开${task.name}的独立会话：${task.task}`);
+  card.addEventListener("click", () => openSubagent(task.id));
+  return card;
 }
 
 async function loadTemplates() {
@@ -685,11 +765,22 @@ function conversationIntro(run) {
   return intro;
 }
 
-function renderConversation(run) {
-  const container = $("#conversation-scroll");
+function renderConversation(run, task = null) {
+  const container = task ? $("#subagent-conversation") : $("#conversation-scroll");
+  const conversationId = `${run.run_id}:${task?.id || "main"}`;
+  const switched = container.dataset.conversationId !== conversationId;
   const shouldStick =
-    container.scrollHeight - container.scrollTop - container.clientHeight < 100;
-  container.replaceChildren(conversationIntro(run));
+    switched || container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+  const previousScroll = container.scrollTop;
+  container.dataset.conversationId = conversationId;
+  const intro = task ? createUserMessage({ display_text: task.task }) : conversationIntro(run);
+  if (task) intro.querySelector(".message-author").textContent = "主 Agent · 委派任务";
+  container.replaceChildren(intro);
+  // A delegation entry belongs in the parent; its transcript belongs only in its own session.
+  const events = run.events.filter((event) => task
+    ? event.payload?.subagent_id === task.id
+    : event.type === "subagent_started" || (!event.payload?.delegated && !event.payload?.subagent_id));
+  const tasks = task ? [] : collectSubagents(run);
   let toolEvents = [];
 
   const flushTools = () => {
@@ -708,7 +799,7 @@ function renderConversation(run) {
     if (!reasoningBlock) {
       const block = element("details", "reasoning-block");
       block.dataset.subagentId = payload.subagent_id || "";
-      const openKey = `${run.run_id}:${key}`;
+      const openKey = `${conversationId}:${key}`;
       block.open = state.reasoningOpen.get(openKey) ?? run.job_active;
       const summary = element("summary");
       summary.append(icon("chevron-right"), element("span", "", `${payload.agent_name || "WebWeave"} · 思考过程`));
@@ -732,7 +823,16 @@ function renderConversation(run) {
     streamedText = "";
   };
 
-  run.events.forEach((event, index) => {
+  events.forEach((event, index) => {
+    if (!task && event.type === "subagent_started") {
+      flushTools();
+      flushStreamedText();
+      reasoningBlock = null;
+      reasoningParts.clear();
+      const delegated = tasks.find((entry) => entry.id === event.payload?.subagent_id);
+      if (delegated) container.append(createSubagentCard(delegated));
+      return;
+    }
     if (event.type === "model_reasoning_delta") {
       flushTools();
       flushStreamedText();
@@ -786,10 +886,17 @@ function renderConversation(run) {
   flushTools();
   flushStreamedText();
 
-  if (run.job_active) {
+  if (task && task.status !== "running") {
+    const result = element("div", "subagent-result", task.reason || task.activity);
+    result.dataset.status = task.status;
+    container.append(result);
+  }
+  if (task ? task.status === "running" : run.job_active) {
     const working = element("div", "agent-working");
-    const latest = [...run.events].reverse().find((event) => ["context_usage", "model_reasoning_delta", "model_output_delta", "tool_started", "tool_output", "llm_retry"].includes(event.type));
-    const stage = latest?.type === "tool_started" ? `正在调用 ${latest.payload.tool_name}`
+    const latest = [...events].reverse().find((event) => ["context_usage", "model_reasoning_delta", "model_output_delta", "tool_started", "tool_output", "llm_retry"].includes(event.type));
+    const runningTask = tasks.find((entry) => entry.status === "running");
+    const stage = runningTask ? `${runningTask.name}正在执行，可在右侧查看`
+      : latest?.type === "tool_started" ? `正在调用 ${latest.payload.tool_name}`
       : latest?.type === "model_reasoning_delta" ? "正在思考"
       : latest?.type === "model_output_delta" ? "正在生成"
       : latest?.type === "llm_retry" ? "连接中断，正在重试"
@@ -798,7 +905,7 @@ function renderConversation(run) {
     container.append(working);
   }
   refreshIcons();
-  if (shouldStick || run.job_active) container.scrollTop = container.scrollHeight;
+  container.scrollTop = shouldStick ? container.scrollHeight : previousScroll;
 }
 
 function createUserMessage(payload) {
@@ -1150,25 +1257,68 @@ function formatBytes(size) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function currentInstance() {
+  const run = state.activeRun;
+  const instances = run?.instances || (run?.instance ? [run.instance] : []);
+  return instances.find((instance) => instance.instance_id === state.selectedInstanceId) || null;
+}
+
+function renderInstances(run) {
+  const instances = run.instances || (run.instance ? [run.instance] : []);
+  if (!instances.some((instance) => instance.instance_id === state.selectedInstanceId)) {
+    state.selectedInstanceId = run.instance?.instance_id || instances.at(-1)?.instance_id || null;
+  }
+  const sessions = $("#instance-sessions");
+  const previousScroll = sessions.scrollLeft;
+  const focused = sessions.contains(document.activeElement) ? document.activeElement.id : null;
+  sessions.replaceChildren();
+  sessions.hidden = instances.length === 0;
+  instances.forEach((instance, index) => {
+    const button = element("button", "instance-session-tab");
+    button.type = "button";
+    button.id = `instance-tab-${instance.instance_id}`;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(instance.instance_id === state.selectedInstanceId));
+    button.setAttribute("aria-controls", "instance-canvas");
+    button.dataset.status = instance.status;
+    button.title = `${instance.cwd}\n${instance.status}`;
+    button.append(element("span", "subagent-dot"), document.createTextNode(`实例 ${index + 1} · ${instance.port || "未启动"}`));
+    button.addEventListener("click", () => {
+      state.selectedInstanceId = instance.instance_id;
+      clearSelection();
+      renderInstances(state.activeRun);
+    });
+    sessions.append(button);
+  });
+  sessions.scrollLeft = previousScroll;
+  if (focused) document.getElementById(focused)?.focus({ preventScroll: true });
+  renderInstance(currentInstance());
+  refreshIcons();
+}
+
 function renderInstance(instance) {
   const active = instance && ["starting", "running", "unhealthy"].includes(instance.status);
-  state.activeRun.instance = instance;
   $("#instance-empty").hidden = Boolean(active);
   $("#instance-frame").hidden = !active;
   $("#instance-address").textContent = instance?.app_url
     ? instance.app_url.replace(/^https?:\/\//, "")
     : "未启动";
   $("#instance-live-dot").classList.toggle("is-offline", !active);
+  $("#instance-start").disabled = Boolean(state.instanceBusy || state.activeRun.job_active);
+  $("#instance-start-label").textContent = state.activeRun.instances?.length ? "新开实例" : "手动启动";
+  $("#instance-start").title = state.activeRun.job_active ? "请等待当前任务结束" : "读取启动文件，新开一个独立实例";
   ["#instance-refresh", "#instance-restart", "#instance-open", "#instance-stop"].forEach((selector) => {
-    $(selector).disabled = !active;
+    $(selector).disabled = !active || state.instanceBusy;
   });
+  $("#instance-restart").disabled = !instance || state.instanceBusy;
+  $("#instance-empty").textContent = instance ? "当前实例未运行，可点击上方重启按钮启动" : "当前对话没有运行中的实例";
   if (!active) {
     instanceFrame.removeAttribute("src");
     state.frameKey = "";
     clearSelection();
     return;
   }
-  const frameKey = `${instance.revision}:${instance.preview_url}`;
+  const frameKey = `${instance.instance_id}:${instance.revision}:${instance.preview_url}`;
   if (frameKey !== state.frameKey) {
     state.frameKey = frameKey;
     instanceFrame.src = instance.preview_url;
@@ -1176,15 +1326,26 @@ function renderInstance(instance) {
 }
 
 async function instanceAction(action) {
-  if (!state.activeRunId) return;
-  const payload = await api(
-    `/api/runs/${encodeURIComponent(state.activeRunId)}/instance`,
-    { method: "POST", body: JSON.stringify({ action, timeout: 30 }) },
-  );
-  if (action === "restart") showToast("实例已重启");
-  if (action === "stop") showToast("实例已停止");
-  renderInstance(payload);
-  await loadActiveRun(true);
+  if (!state.activeRunId || state.instanceBusy) return;
+  const runId = state.activeRunId;
+  const instanceId = action === "start" ? undefined : state.selectedInstanceId;
+  state.instanceBusy = true;
+  renderInstance(currentInstance());
+  try {
+    const payload = await api(
+      `/api/runs/${encodeURIComponent(runId)}/instance`,
+      { method: "POST", body: JSON.stringify({ action, instance_id: instanceId, timeout: 30 }) },
+    );
+    if (runId !== state.activeRunId) return;
+    if (action === "start") showToast("实例已启动");
+    if (action === "restart") showToast("实例已重启");
+    if (action === "stop") showToast("实例已停止");
+    if (action === "start") state.selectedInstanceId = payload.instance_id;
+    await loadActiveRun(true);
+  } finally {
+    state.instanceBusy = false;
+    if (state.activeRun) renderInstances(state.activeRun);
+  }
 }
 
 function setInspectMode(mode) {
@@ -1210,7 +1371,7 @@ function receivePreviewMessage(event) {
   const selection = {
     type: event.data.mode,
     run_id: state.activeRunId,
-    app_url: state.activeRun?.instance?.app_url || null,
+    app_url: currentInstance()?.app_url || null,
     ...event.data.selection,
   };
   renderSelection(selection);
@@ -1291,13 +1452,14 @@ function fillModelSelect(select, models, selected, emptyLabel = null) {
 function renderModelSettings() {
   fillModelSelect($("#llm-main-select"), state.modelsDraft, state.mainModelId);
   fillModelSelect($("#llm-vision-select"), state.modelsDraft, state.visionModelId, "不使用独立视觉模型");
+  fillModelSelect($("#context-model"), state.modelsDraft, state.summaryModelId || "", "跟随当前 Agent 模型");
   const list = $("#model-list");
   list.replaceChildren();
   state.modelsDraft.forEach((model) => {
     const row = element("div", "model-row");
     const name = element("div", "model-row-name");
     name.append(element("strong", "", model.model));
-    const roles = [model.id === state.mainModelId ? "主模型" : "", model.id === state.visionModelId ? "视觉模型" : ""].filter(Boolean);
+    const roles = [model.id === state.mainModelId ? "主模型" : "", model.id === state.visionModelId ? "视觉模型" : "", model.id === state.summaryModelId ? "摘要模型" : ""].filter(Boolean);
     if (roles.length) name.append(element("small", "model-role-label", roles.join(" · ")));
     const url = element("code", "model-row-url", model.base_url);
     url.title = model.base_url;
@@ -1312,6 +1474,7 @@ function renderModelSettings() {
     remove.title = remove.disabled ? "请先选择其他主模型" : "从列表移除，保存配置后生效";
     remove.addEventListener("click", () => {
       if (state.agents.some((agent) => agent.model_id === model.id)) { showToast("请先将使用此模型的 Agent 改为其他模型或跟随主模型"); return; }
+      if (state.summaryModelId === model.id) { showToast("请先更换摘要模型或选择跟随当前 Agent"); return; }
       state.modelsDraft = state.modelsDraft.filter((entry) => entry.id !== model.id);
       if (state.visionModelId === model.id) state.visionModelId = "";
       if (state.editingModelId === model.id) closeModelEditor();
@@ -1687,6 +1850,14 @@ function renderConfig() {
   $("#context-keep").value = config.context.keep_recent_items;
   $("#context-summary").value = config.context.summary_max_tokens;
   $("#context-timeout").value = config.context.compression_timeout_seconds;
+  state.summaryModelId = config.context.summary_model_id || "";
+  $("#context-summary-input").value = config.context.summary_input_tokens;
+  const localCompression = config.context.local_compression || {};
+  $("#context-local-enabled").checked = Boolean(localCompression.enabled);
+  $("#context-python").value = localCompression.python || "compression/.venv/Scripts/python.exe";
+  $("#context-local-model").value = localCompression.model || "microsoft/llmlingua-2-xlm-roberta-large-meetingbank";
+  $("#context-local-device").value = localCompression.device || "cuda";
+  $("#context-local-rate").value = localCompression.rate ?? 0.7;
   const llm = config.llm || {};
   state.modelsDraft = configuredModels(config).map((model) => ({ ...model, headers: model.headers ? { ...model.headers } : undefined }));
   state.mainModelId = llm.main_model_id || state.modelsDraft[0]?.id || "";
@@ -1725,6 +1896,7 @@ function toolIcon(name) {
     web_search: "search",
     create_file: "file-plus-2",
     file_read: "file-search",
+    read_context_segment: "archive",
     terminal_run: "terminal",
     web_instance: "monitor-up",
   }[name] || "wrench";
@@ -1774,12 +1946,22 @@ async function saveConfig() {
       max_seconds: Number($("#timeout-max").value),
     },
     context: {
+      ...state.config.context,
       enabled: $("#context-enabled").checked,
       max_input_tokens: Number($("#context-max-input").value),
       compression_trigger_ratio: Number($("#context-trigger").value),
       keep_recent_items: Number($("#context-keep").value),
       summary_max_tokens: Number($("#context-summary").value),
       compression_timeout_seconds: Number($("#context-timeout").value),
+      summary_model_id: state.summaryModelId || "",
+      summary_input_tokens: Number($("#context-summary-input").value),
+      local_compression: {
+        enabled: $("#context-local-enabled").checked,
+        python: $("#context-python").value.trim(),
+        model: $("#context-local-model").value.trim(),
+        device: $("#context-local-device").value,
+        rate: Number($("#context-local-rate").value),
+      },
     },
   };
   const response = await api("/api/config", {
@@ -1878,6 +2060,7 @@ function bindEvents() {
   });
   $("#llm-main-select").addEventListener("change", (event) => { state.mainModelId = event.target.value; renderModelSettings(); markConfigDirty(); });
   $("#llm-vision-select").addEventListener("change", (event) => { state.visionModelId = event.target.value; renderModelSettings(); markConfigDirty(); });
+  $("#context-model").addEventListener("change", (event) => { state.summaryModelId = event.target.value; renderModelSettings(); markConfigDirty(); });
   $("#agent-add").addEventListener("click", () => openAgentEditor());
   $("#agent-editor-close").addEventListener("click", closeAgentEditor);
   $("#agent-form").addEventListener("submit", (event) => {
@@ -1900,9 +2083,10 @@ function bindEvents() {
     if (instanceFrame.src) instanceFrame.contentWindow.location.reload();
   });
   $("#instance-restart").addEventListener("click", () => runSafely(() => instanceAction("restart")));
+  $("#instance-start").addEventListener("click", () => runSafely(() => instanceAction("start")));
   $("#instance-stop").addEventListener("click", () => runSafely(() => instanceAction("stop")));
   $("#instance-open").addEventListener("click", () => {
-    const url = state.activeRun?.instance?.app_url;
+    const url = currentInstance()?.app_url;
     if (url) window.open(url, "_blank", "noopener,noreferrer");
   });
   $("#settings-save").addEventListener("click", () => runSafely(saveConfig));

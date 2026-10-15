@@ -46,11 +46,12 @@ type runSummary struct {
 
 type runDetail struct {
 	runSummary
-	State        runState        `json:"state"`
-	Events       []runEvent      `json:"events"`
-	Instance     *instanceRecord `json:"instance"`
-	JobActive    bool            `json:"job_active"`
-	ContextUsage contextUsage    `json:"context_usage"`
+	State        runState          `json:"state"`
+	Events       []runEvent        `json:"events"`
+	Instance     *instanceRecord   `json:"instance"`
+	Instances    []*instanceRecord `json:"instances"`
+	JobActive    bool              `json:"job_active"`
+	ContextUsage contextUsage      `json:"context_usage"`
 }
 
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -386,8 +387,8 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) (any, int, error
 			if err := readJSONBody(r, &args); err != nil {
 				return nil, 0, err
 			}
-			if args.Action == "start" {
-				return nil, 0, apiError{400, "INVALID_ACTION", "WebUI 不支持启动操作，请由 Agent 启动实例"}
+			if args.Action == "start" && (args.Command != "" || args.Cwd != "" || args.Port != nil || args.HealthPath != "") {
+				return nil, 0, apiError{400, "INVALID_ACTION", "手动启动只读取当前项目的启动文件，不接受额外启动参数"}
 			}
 			timeout, err := tools.ResolveTimeout(tools.Config{DefaultSeconds: a.config.get().ToolTimeout.DefaultSeconds, MaxSeconds: a.config.get().ToolTimeout.MaxSeconds}, args.Timeout)
 			if err != nil {
@@ -436,13 +437,22 @@ func (a *App) detail(id string) (runDetail, error) {
 			break
 		}
 	}
-	instance := state.Instance
-	if instance != nil {
-		copy := *instance
-		copy.PreviewURL = previewURL(id)
-		instance = &copy
+	instances := make([]*instanceRecord, 0)
+	var instance *instanceRecord
+	run.instanceMu.Lock()
+	for _, record := range runInstances(state) {
+		copy := *record
+		copy.PreviewURL = instancePreviewURL(id, copy.InstanceID)
+		if (copy.Status == "running" || copy.Status == "starting" || copy.Status == "unhealthy") && !a.instanceAlive(run, &copy) {
+			copy.Status = "exited"
+		}
+		instances = append(instances, &copy)
+		if state.Instance != nil && copy.InstanceID == state.Instance.InstanceID {
+			instance = &copy
+		}
 	}
-	return runDetail{runSummary{id, title, status, state.UpdatedAt, state.EventCount, instance != nil}, state, events, instance, active, a.runContextUsage(events)}, nil
+	run.instanceMu.Unlock()
+	return runDetail{runSummary{id, title, status, state.UpdatedAt, state.EventCount, instance != nil}, state, events, instance, instances, active, a.runContextUsage(events)}, nil
 }
 
 func (a *App) listRuns() ([]runSummary, error) {
@@ -483,9 +493,9 @@ func (a *App) deleteRun(id string) error {
 	if err != nil {
 		return err
 	}
-	if state.Instance != nil {
+	for _, instance := range runInstances(state) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*second)
-		err = a.stopInstance(ctx, run, state.Instance)
+		err = a.stopInstance(ctx, run, instance)
 		cancel()
 		if err != nil {
 			return err

@@ -23,16 +23,17 @@ type runEvent struct {
 }
 
 type runState struct {
-	RunID            string          `json:"run_id"`
-	AgentID          string          `json:"agent_id"`
-	ReasoningEffort  string          `json:"reasoning_effort,omitempty"`
-	Status           string          `json:"status"`
-	UpdatedAt        string          `json:"updated_at"`
-	LastEvent        string          `json:"last_event"`
-	EventCount       int             `json:"event_count"`
-	ContextUpdatedAt string          `json:"context_updated_at,omitempty"`
-	ContextVersion   int             `json:"context_version,omitempty"`
-	Instance         *instanceRecord `json:"instance,omitempty"`
+	RunID            string            `json:"run_id"`
+	AgentID          string            `json:"agent_id"`
+	ReasoningEffort  string            `json:"reasoning_effort,omitempty"`
+	Status           string            `json:"status"`
+	UpdatedAt        string            `json:"updated_at"`
+	LastEvent        string            `json:"last_event"`
+	EventCount       int               `json:"event_count"`
+	ContextUpdatedAt string            `json:"context_updated_at,omitempty"`
+	ContextVersion   int               `json:"context_version,omitempty"`
+	Instance         *instanceRecord   `json:"instance,omitempty"`
+	Instances        []*instanceRecord `json:"instances,omitempty"`
 }
 
 type savedContext struct {
@@ -171,7 +172,24 @@ func (s *runStore) saveInstance(record *instanceRecord) error {
 	if err != nil {
 		return err
 	}
-	state.Instance = record
+	instances := runInstances(state)
+	found := false
+	for index, current := range instances {
+		if current.InstanceID == record.InstanceID {
+			instances[index], found = record, true
+			break
+		}
+	}
+	if !found {
+		instances = append(instances, record)
+	}
+	if !found || state.Instance == nil || state.Instance.InstanceID == record.InstanceID {
+		state.Instance = record
+	}
+	for _, instance := range instances {
+		instance.PreviewURL = instancePreviewURL(s.id, instance.InstanceID)
+	}
+	state.Instances = instances
 	return workspace.WriteJSONAtomic(filepath.Join(s.dir, "state.json"), state)
 }
 

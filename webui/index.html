@@ -153,6 +153,7 @@
               <header class="inspector-header">
                 <div class="inspector-tabs" role="tablist">
                   <button class="inspector-tab is-active" data-tab="activity" type="button">执行</button>
+                  <button class="inspector-tab" data-tab="subagents" type="button">子 Agent <span id="subagent-count">0</span></button>
                   <button class="inspector-tab" data-tab="files" type="button">文件</button>
                   <button class="inspector-tab" data-tab="instance" type="button">实例</button>
                 </div>
@@ -171,6 +172,23 @@
                 </dl>
                 <div class="section-heading"><h3>调用记录</h3><button id="activity-refresh" class="icon-button subtle" type="button" title="刷新"><i data-lucide="refresh-cw"></i></button></div>
                 <div id="tool-list" class="tool-list"></div>
+              </div>
+
+              <div id="subagents-panel" class="inspector-panel subagents-panel">
+                <div id="subagent-empty" class="subagent-empty">
+                  <i data-lucide="messages-square"></i>
+                  <h2>子 Agent 会话</h2>
+                  <p>主 Agent 委派任务后，每次任务会在这里打开独立会话。</p>
+                </div>
+                <div id="subagent-session" class="subagent-session" hidden>
+                  <div id="subagent-sessions" class="subagent-sessions" role="tablist" aria-label="子 Agent 会话"></div>
+                  <header class="subagent-session-header">
+                    <div><span class="eyebrow">独立会话</span><h2 id="subagent-name"></h2></div>
+                    <span id="subagent-session-status" class="success-badge"></span>
+                  </header>
+                  <div id="subagent-conversation" class="subagent-conversation" role="tabpanel" aria-label="子 Agent 对话记录" tabindex="0"></div>
+                  <footer class="subagent-session-footer"><i data-lucide="git-branch"></i><span>由主 Agent 委派，执行结果自动返回主对话</span></footer>
+                </div>
               </div>
 
               <div id="files-panel" class="inspector-panel">
@@ -193,6 +211,7 @@
               </div>
 
               <div id="instance-panel" class="inspector-panel instance-panel">
+                <div id="instance-sessions" class="instance-sessions" role="tablist" aria-label="Web 实例" hidden></div>
                 <div class="instance-toolbar">
                   <div class="instance-address"><span id="instance-live-dot" class="live-dot"></span><span id="instance-address">未启动</span></div>
                   <div>
@@ -201,6 +220,10 @@
                     <button id="instance-open" class="icon-button subtle" type="button" title="在新窗口打开"><i data-lucide="external-link"></i></button>
                     <button id="instance-stop" class="icon-button subtle danger" type="button" title="停止实例"><i data-lucide="square"></i></button>
                   </div>
+                </div>
+                <div class="instance-launchbar">
+                  <span>使用已保存的启动配置运行项目</span>
+                  <button id="instance-start" class="button button-primary compact" type="button"><i data-lucide="play"></i><span id="instance-start-label">手动启动</span></button>
                 </div>
                 <div class="instance-controls">
                   <div class="inspect-modes" aria-label="实例交互模式">
@@ -214,7 +237,7 @@
                     <button class="viewport-button" type="button" data-width="390px" title="手机"><i data-lucide="smartphone"></i></button>
                   </div>
                 </div>
-                <div class="instance-canvas">
+                <div id="instance-canvas" class="instance-canvas" role="tabpanel" aria-label="当前实例预览">
                   <iframe id="instance-frame" title="生成应用实例预览"></iframe>
                   <div id="instance-empty" class="instance-empty">当前对话没有运行中的实例</div>
                 </div>
@@ -301,13 +324,22 @@
               <section class="settings-section">
                 <div class="settings-copy"><h2>上下文压缩</h2><p>达到阈值后自动生成摘要。</p></div>
                 <div class="context-settings">
-                  <div class="setting-line"><span><strong>启用自动压缩</strong><small>使用当前 Agent 模型</small></span><label class="switch"><input id="context-enabled" type="checkbox" /><span></span></label></div>
+                  <div class="setting-line"><span><strong>启用自动压缩</strong><small>分块合并任务记忆，保留近期交互</small></span><label class="switch"><input id="context-enabled" type="checkbox" /><span></span></label></div>
                   <div class="field-grid">
                     <label><span>最大输入 Token</span><input id="context-max-input" type="number" min="1" /></label>
                     <label><span>触发比例</span><input id="context-trigger" type="number" min="0.01" max="0.99" step="0.01" /></label>
                     <label><span>保留最近项目</span><input id="context-keep" type="number" min="1" /></label>
                     <label><span>摘要最大 Token</span><input id="context-summary" type="number" min="1" /></label>
+                    <label><span>摘要模型</span><select id="context-model" aria-label="摘要模型"></select></label>
+                    <label><span>每批摘要输入 Token</span><input id="context-summary-input" type="number" min="1" /></label>
                     <label><span>压缩超时</span><div class="number-field"><input id="context-timeout" type="number" min="0.1" step="0.1" /><em>秒</em></div></label>
+                  </div>
+                  <div class="setting-line"><span><strong>本地资料压缩</strong><small>仅压缩旧文本资料；原文可随时回读</small></span><label class="switch"><input id="context-local-enabled" type="checkbox" /><span></span></label></div>
+                  <div class="field-grid">
+                    <label><span>Python 路径</span><input id="context-python" type="text" /></label>
+                    <label><span>本地压缩模型</span><input id="context-local-model" type="text" /></label>
+                    <label><span>运行设备</span><select id="context-local-device"><option value="cuda">GPU</option><option value="cpu">CPU</option></select></label>
+                    <label><span>资料保留比例</span><input id="context-local-rate" type="number" min="0.01" max="1" step="0.01" /></label>
                   </div>
                 </div>
               </section>

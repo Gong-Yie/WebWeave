@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -340,7 +341,7 @@ func TestAgentSDKToolLoop(t *testing.T) {
 				}
 				if calls.Add(1) == 1 {
 					tools := request["tools"].([]any)
-					if len(tools) != 8 {
+					if len(tools) != 9 {
 						t.Errorf("tool count %d", len(tools))
 					}
 					for _, tool := range tools {
@@ -525,6 +526,12 @@ func TestVisionAndCompression(t *testing.T) {
 			}
 			items := []inputItem{{"role": "user", "content": "旧任务"}, {"role": "assistant", "content": "旧答复"}, {"role": "user", "content": "最近任务"}, {"type": "function_call", "call_id": "pair"}, {"type": "function_call_output", "call_id": "pair", "output": "ok"}}
 			compressed, err := app.compressContext(context.Background(), client, run.store, items, cfg)
+			if fallback {
+				if !errors.Is(err, errContextCompression) || !reflect.DeepEqual(compressed, items) {
+					t.Fatal("failed compression did not preserve the original context", err)
+				}
+				return
+			}
 			if err != nil || len(compressed) != 5 || itemString(compressed[1], "content") != "旧任务" || itemString(compressed[3], "call_id") != "pair" || len(repairItems(compressed)) != len(compressed) {
 				t.Fatalf("compression broke tool pairing: %+v %v", compressed, err)
 			}
@@ -621,7 +628,7 @@ func TestInstanceHelper(t *testing.T) {
 	address := args[len(args)-2] + ":" + args[len(args)-1]
 	if err := http.ListenAndServe(address, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, "<html><body>fixture instance</body></html>")
+		fmt.Fprintf(w, "<html><body>fixture instance %s</body></html>", os.Getenv("WEBWEAVE_INSTANCE_ID"))
 	})); err != nil {
 		os.Exit(2)
 	}
@@ -647,7 +654,11 @@ func TestInstanceLifecycle(t *testing.T) {
 		t.Fatalf("instance start: %+v %v\nprocess log:\n%s", instance, err, log)
 	}
 	firstRevision := instance.Revision
-	if _, err := app.instanceAction(ctx, run.store.id, tools.Args{Action: "start", Command: command}); err == nil {
+	var launch launchConfig
+	if err := readJSONFile(filepath.Join(app.runRoot("result", run.store.id), launchConfigName), &launch); err != nil || launch.Command != command || launch.Cwd != "." {
+		t.Fatalf("Agent startup parameters were not saved: %+v %v", launch, err)
+	}
+	if _, err := app.instanceAction(ctx, run.store.id, tools.Args{Action: "start", InstanceID: instance.InstanceID, Command: command}); err == nil {
 		t.Fatal("duplicate instance allowed")
 	}
 	response := apiRequest(t, app, "GET", previewURL(run.store.id), nil)

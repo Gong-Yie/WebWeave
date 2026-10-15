@@ -1,0 +1,4 @@
+llmlingua==0.2.2
+transformers>=4.26,<5
+huggingface-hub[hf_xet]>=0.26,<1
+tiktoken>=0.7,<1

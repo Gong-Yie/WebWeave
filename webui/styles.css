@@ -610,7 +610,7 @@ svg {
 
 .workspace-grid {
   display: grid;
-  grid-template-columns: minmax(440px, 1fr) 5px var(--inspector-width);
+  grid-template-columns: minmax(0, 1fr) 5px var(--inspector-width);
   flex: 1;
   overflow: hidden;
 }
@@ -1346,6 +1346,10 @@ body.is-resizing {
   padding: 0;
   overflow: hidden;
 }
+
+.instance-launchbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; padding: 12px 14px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.instance-launchbar > span { color: var(--text-soft); font-size: 11px; line-height: 1.6; }
+.instance-launchbar .button { flex-shrink: 0; }
 
 .instance-toolbar,
 .instance-controls {
@@ -3251,6 +3255,87 @@ html.has-background-image .settings-view {
 .subagent-row[data-status="running"] .subagent-dot { background: var(--nav-accent); animation: working-pulse 1.15s ease-in-out infinite; }
 .subagent-row[data-status="completed"] .subagent-dot { background: var(--success); }
 .subagent-row[data-status="failed"] .subagent-dot { background: var(--danger); }
+
+.subagent-task-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(100%, 790px);
+  margin: 0 auto 24px;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  cursor: pointer;
+  text-align: left;
+}
+
+.subagent-task-card:hover { border-color: var(--nav-accent); }
+.subagent-task-card > svg { flex-shrink: 0; color: var(--nav-accent); }
+.subagent-task-copy { display: grid; gap: 5px; flex: 1; min-width: 0; }
+.subagent-task-copy strong { font-size: 12px; }
+.subagent-task-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-soft); font-size: 11px; }
+.subagent-task-status { display: flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: 10px; color: var(--text-soft); }
+
+.subagents-panel { padding: 0; overflow: hidden; }
+.subagents-panel.is-active { display: flex; flex-direction: column; }
+.subagent-session { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.subagent-session[hidden], .subagent-empty[hidden] { display: none; }
+.subagent-empty { margin: auto; padding: 32px 24px; text-align: center; color: var(--text-soft); }
+.subagent-empty > svg { width: 30px; height: 30px; color: var(--nav-accent); }
+.subagent-empty h2 { margin: 14px 0 8px; color: var(--text); font-size: 16px; }
+.subagent-empty p { margin: 0; font-size: 12px; line-height: 1.8; }
+#subagent-count { margin-left: 3px; color: var(--text-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+
+.subagent-sessions,
+.instance-sessions {
+  display: flex;
+  gap: 7px;
+  flex-shrink: 0;
+  overflow-x: auto;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: thin;
+}
+
+.subagent-session-tab,
+.instance-session-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-soft);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.subagent-session-tab[aria-selected="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.instance-session-tab[aria-selected="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.instance-sessions[hidden] { display: none; }
+.instance-session-tab[data-status="running"] .subagent-dot { background: var(--success); }
+.instance-session-tab[data-status="failed"] .subagent-dot { background: var(--danger); }
+.subagent-session-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.subagent-session-header h2 { margin: 5px 0 0; font-size: 16px; }
+.subagent-conversation { flex: 1; min-height: 0; overflow-y: auto; padding: 22px 20px; background: var(--surface); scrollbar-width: thin; overflow-wrap: anywhere; }
+.subagent-conversation .message { gap: 9px; margin-bottom: 22px; }
+.subagent-conversation .message-body { font-size: 12px; white-space: pre-wrap; }
+.subagent-conversation .message-user .message-body { max-width: 100%; max-height: 180px; overflow-y: auto; }
+.subagent-conversation .reasoning-block { margin-left: 0; }
+.subagent-conversation .activity-card { margin-bottom: 22px; }
+.subagent-session-footer { display: flex; align-items: center; justify-content: center; gap: 7px; flex-shrink: 0; padding: 12px 16px; border-top: 1px solid var(--border); color: var(--text-faint); font-size: 10px; }
+.subagent-session-footer svg { width: 13px; height: 13px; }
+.subagent-result { padding: 12px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-soft); font-size: 12px; white-space: pre-wrap; }
+.subagent-result[data-status="failed"] { color: var(--danger); }
+.subagent-task-card[data-status="running"] .subagent-dot,
+.subagent-session-tab[data-status="running"] .subagent-dot { background: var(--nav-accent); }
+.subagent-task-card[data-status="completed"] .subagent-dot,
+.subagent-session-tab[data-status="completed"] .subagent-dot { background: var(--success); }
+.subagent-task-card[data-status="failed"] .subagent-dot,
+.subagent-session-tab[data-status="failed"] .subagent-dot { background: var(--danger); }
 
 .context-meter {
   display: flex;

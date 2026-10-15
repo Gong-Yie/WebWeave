@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -20,7 +21,7 @@ var bridgeScript string
 //go:embed preview_bridge.css
 var bridgeStyle string
 
-type previewRoute struct{ id, path, source string }
+type previewRoute struct{ id, instanceID, path, source string }
 
 func routeFromPath(raw string) (previewRoute, bool) {
 	parsed, err := url.Parse(raw)
@@ -32,13 +33,25 @@ func routeFromPath(raw string) (previewRoute, bool) {
 		return previewRoute{}, false
 	}
 	path := "/"
+	instanceID := ""
 	if len(parts) == 4 {
-		path += parts[3]
+		tail := parts[3]
+		if strings.HasPrefix(tail, "_instances/") {
+			segments := strings.SplitN(tail, "/", 3)
+			if len(segments) < 2 || !workspace.ValidName(segments[1]) {
+				return previewRoute{}, false
+			}
+			instanceID, tail = segments[1], ""
+			if len(segments) == 3 {
+				tail = segments[2]
+			}
+		}
+		path += tail
 	}
 	if parsed.RawQuery != "" {
 		path += "?" + parsed.RawQuery
 	}
-	return previewRoute{parts[2], path, "direct"}, true
+	return previewRoute{id: parts[2], instanceID: instanceID, path: path, source: "direct"}, true
 }
 
 func resolvePreviewRoute(r *http.Request) (previewRoute, bool) {
@@ -49,15 +62,27 @@ func resolvePreviewRoute(r *http.Request) (previewRoute, bool) {
 		route.path, route.source = r.URL.RequestURI(), "referer"
 		return route, true
 	}
-	if cookie, err := r.Cookie("ww_preview_run"); err == nil && workspace.ValidName(cookie.Value) {
-		return previewRoute{cookie.Value, r.URL.RequestURI(), "cookie"}, true
+	if cookie, err := r.Cookie("ww_preview_run"); err == nil {
+		parts := strings.SplitN(cookie.Value, ":", 2)
+		if workspace.ValidName(parts[0]) && (len(parts) == 1 || workspace.ValidName(parts[1])) {
+			route := previewRoute{id: parts[0], path: r.URL.RequestURI(), source: "cookie"}
+			if len(parts) == 2 {
+				route.instanceID = parts[1]
+			}
+			return route, true
+		}
 	}
 	return previewRoute{}, false
 }
 
-func injectBridge(body []byte, id string) []byte {
+func injectBridge(body []byte, baseURL string, scoped bool) []byte {
 	html := strings.ToValidUTF8(string(body), "�")
-	base := `<base href="` + previewURL(id) + `">`
+	base := `<base href="` + baseURL + `">`
+	if scoped {
+		encoded, _ := json.Marshal(baseURL)
+		// WebSocket requests may omit Referer; bind same-origin connections before app scripts run.
+		base += `<script>(()=>{const base=` + string(encoded) + `,Native=window.WebSocket;if(!Native)return;window.WebSocket=new Proxy(Native,{construct(Target,args){const endpoint=new URL(args[0],document.baseURI.replace(/^http/,"ws"));if(endpoint.host===location.host&&/^wss?:$/.test(endpoint.protocol)&&!endpoint.pathname.startsWith(base)){endpoint.pathname=base+endpoint.pathname.replace(/^\/+/,"");args[0]=endpoint.href}return Reflect.construct(Target,args)}})})();</script>`
+	}
 	if head := strings.Index(strings.ToLower(html), "<head"); head >= 0 {
 		if end := strings.IndexByte(html[head:], '>'); end >= 0 {
 			index := head + end + 1
@@ -88,11 +113,18 @@ func (a *App) servePreview(w http.ResponseWriter, r *http.Request, route preview
 		a.writeError(w, r, err)
 		return
 	}
-	if state.Instance == nil {
+	instance := findInstance(state, route.instanceID)
+	if instance == nil {
 		a.writeError(w, r, apiError{404, "INSTANCE_NOT_FOUND", "实例不存在"})
 		return
 	}
-	upstream, err := url.Parse(state.Instance.AppURL)
+	baseURL := previewURL(route.id)
+	cookieValue := route.id
+	if route.instanceID != "" {
+		baseURL = instancePreviewURL(route.id, route.instanceID)
+		cookieValue += ":" + route.instanceID
+	}
+	upstream, err := url.Parse(instance.AppURL)
 	if err != nil || upstream.Scheme != "http" || upstream.Hostname() != "127.0.0.1" || upstream.Port() == "" {
 		a.writeError(w, r, apiError{400, "INVALID_INSTANCE", "实例地址不是受支持的本地地址"})
 		return
@@ -136,7 +168,7 @@ func (a *App) servePreview(w http.ResponseWriter, r *http.Request, route preview
 			}
 			response.Header.Del("Content-Security-Policy")
 			response.Header.Del("X-Frame-Options")
-			response.Header.Add("Set-Cookie", "ww_preview_run="+route.id+"; Path=/; SameSite=Lax")
+			response.Header.Add("Set-Cookie", "ww_preview_run="+cookieValue+"; Path=/; SameSite=Lax")
 			if location := response.Header.Get("Location"); location != "" {
 				if strings.HasPrefix(location, upstream.String()) {
 					location = strings.TrimPrefix(location, upstream.String())
@@ -145,7 +177,7 @@ func (a *App) servePreview(w http.ResponseWriter, r *http.Request, route preview
 					}
 				}
 				if strings.HasPrefix(location, "/") {
-					response.Header.Set("Location", previewURL(route.id)+strings.TrimLeft(location, "/"))
+					response.Header.Set("Location", baseURL+strings.TrimLeft(location, "/"))
 				}
 			}
 			if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/html") && r.Method != "HEAD" {
@@ -160,7 +192,7 @@ func (a *App) servePreview(w http.ResponseWriter, r *http.Request, route preview
 				if len(data) > 50*1024*1024 {
 					return errors.New("实例 HTML 超过大小限制")
 				}
-				data = injectBridge(data, route.id)
+				data = injectBridge(data, baseURL, route.instanceID != "")
 				response.Body = io.NopCloser(bytes.NewReader(data))
 				response.ContentLength = int64(len(data))
 				response.Header.Set("Content-Length", strconv.Itoa(len(data)))
