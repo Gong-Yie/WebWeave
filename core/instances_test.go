@@ -97,12 +97,73 @@ func TestMultipleInstances(t *testing.T) {
 	if !healthy(ctx, &second) {
 		t.Fatal("a failed launch interrupted another instance")
 	}
+	beforeDelete, err := run.store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
 	firstPID := *findInstance(state, first.InstanceID).PID
+	assertStatus(t, apiRequest(t, app, "POST", path, map[string]any{"action": "delete", "instance_id": first.InstanceID}), 200)
+	if tools.ProcessIdentity(firstPID) != "" || !healthy(ctx, &second) {
+		t.Fatal("deleting the first instance left its process alive or interrupted the second")
+	}
+	assertStatus(t, apiRequest(t, app, "GET", first.PreviewURL, nil), 404)
+	assertStatus(t, apiRequest(t, app, "POST", path, map[string]any{"action": "delete", "instance_id": first.InstanceID}), 404)
+	detail, err = restored.detail(run.store.id)
+	if err != nil || findInstance(detail.State, first.InstanceID) != nil || detail.Instance == nil || detail.Instance.InstanceID != beforeDelete.Instance.InstanceID {
+		t.Fatalf("deleting a non-current instance changed the current instance or restored the deleted record: %v", err)
+	}
+	assertStatus(t, apiRequest(t, app, "POST", path, map[string]any{"action": "delete", "instance_id": beforeDelete.Instance.InstanceID}), 200)
+	detail, err = restored.detail(run.store.id)
+	if err != nil || len(detail.Instances) != 1 || detail.Instance == nil || detail.Instance.InstanceID != second.InstanceID {
+		t.Fatalf("deleting the current instance did not select the remaining instance: %v", err)
+	}
 	if err := app.deleteRun(run.store.id); err != nil {
 		t.Fatal(err)
 	}
 	if tools.ProcessIdentity(firstPID) != "" || tools.ProcessIdentity(*second.PID) != "" {
 		t.Fatal("deleting a run left an instance process alive")
+	}
+}
+
+func TestDeleteInstanceRecords(t *testing.T) {
+	for _, status := range []string{"stopped", "exited", "failed", "legacy"} {
+		t.Run(status, func(t *testing.T) {
+			app := testApp(t)
+			run := testRun(t, app, "delete-instance")
+			record := &instanceRecord{InstanceID: "delete-me", Status: status}
+			if status == "legacy" {
+				err := workspace.WriteJSONAtomic(filepath.Join(run.store.dir, "state.json"), runState{RunID: run.store.id, Instance: record})
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err := run.store.saveInstance(record); err != nil {
+				t.Fatal(err)
+			}
+			resultFile := filepath.Join(app.runRoot("result", run.store.id), "index.html")
+			if err := os.WriteFile(resultFile, []byte("keep this project"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := app.writeLaunchFiles(run.store.id, launchConfig{Command: "python -m http.server {port} --bind {host}", Cwd: ".", HealthPath: "/"}); err != nil {
+				t.Fatal(err)
+			}
+			path := "/api/runs/" + run.store.id + "/instance"
+			assertStatus(t, apiRequest(t, app, "POST", path, map[string]any{"action": "delete"}), 409)
+			assertStatus(t, apiRequest(t, app, "POST", path, map[string]any{"action": "delete", "instance_id": "another-run-instance"}), 404)
+			state, err := run.store.readState()
+			if err != nil || findInstance(state, record.InstanceID) == nil {
+				t.Fatalf("invalid deletion changed the instance: %+v; %v", state, err)
+			}
+			assertStatus(t, apiRequest(t, app, "POST", path, map[string]any{"action": "delete", "instance_id": record.InstanceID}), 200)
+			detail, err := app.detail(run.store.id)
+			if err != nil || detail.Instance != nil || len(detail.Instances) != 0 || detail.State.Instance != nil {
+				t.Fatalf("last instance was not removed: %+v; %v", detail, err)
+			}
+			for _, name := range []string{"index.html", "webweave-start.json", "start-webweave.ps1"} {
+				if _, err := os.Stat(filepath.Join(app.runRoot("result", run.store.id), name)); err != nil {
+					t.Fatalf("deleting an instance removed project file %s: %v", name, err)
+				}
+			}
+		})
 	}
 }
 

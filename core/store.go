@@ -193,6 +193,32 @@ func (s *runStore) saveInstance(record *instanceRecord) error {
 	return workspace.WriteJSONAtomic(filepath.Join(s.dir, "state.json"), state)
 }
 
+func (s *runStore) deleteInstance(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.appendLocked("instance_deleted", map[string]any{"instance_id": id}, ""); err != nil {
+		return err
+	}
+	state, err := s.stateLocked()
+	if err != nil {
+		return err
+	}
+	instances := make([]*instanceRecord, 0)
+	for _, instance := range runInstances(state) {
+		if instance.InstanceID != id {
+			instances = append(instances, instance)
+		}
+	}
+	state.Instances = instances
+	if state.Instance != nil && state.Instance.InstanceID == id {
+		state.Instance = nil
+		if len(instances) > 0 {
+			state.Instance = instances[len(instances)-1]
+		}
+	}
+	return workspace.WriteJSONAtomic(filepath.Join(s.dir, "state.json"), state)
+}
+
 func (s *runStore) saveContext(items []inputItem, summary any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

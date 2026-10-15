@@ -13,7 +13,7 @@ class Element {
     this.tagName = tag.toUpperCase();
     this.children = [];
     this.dataset = {};
-    this.style = {};
+    this.style = { setProperty(name, value) { this[name] = value; } };
     this.attributes = new Map();
     this.listeners = new Map();
     this.lastChild = { textContent: "" };
@@ -53,6 +53,7 @@ class Element {
     return matches;
   }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+  contains(node) { return node === this || this.children.some((child) => child instanceof Element && child.contains(node)); }
   remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((child) => child !== this); }
   setAttribute(name, value) { this.attributes.set(name, value); }
   removeAttribute(name) { this.attributes.delete(name); }
@@ -60,6 +61,13 @@ class Element {
     if (!this.listeners.has(name)) this.listeners.set(name, []);
     this.listeners.get(name).push(listener);
   }
+  removeEventListener(name, listener) {
+    this.listeners.set(name, (this.listeners.get(name) || []).filter((item) => item !== listener));
+  }
+  getBoundingClientRect() { return this.bounds || { left: 0, right: 1000, width: 1000 }; }
+  setPointerCapture(id) { this.pointerId = id; }
+  hasPointerCapture(id) { return this.pointerId === id; }
+  releasePointerCapture() { this.pointerId = null; }
   focus() {}
 }
 
@@ -72,6 +80,7 @@ function workspaceSandbox(fetch = async () => { throw new Error("Unexpected requ
   };
   const nav = node("workspace-nav");
   nav.dataset.view = "workspace";
+  const stored = new Map();
   const sandbox = vm.createContext({
     window: {
       innerWidth: 1200, location: { hash: "" },
@@ -80,8 +89,9 @@ function workspaceSandbox(fetch = async () => { throw new Error("Unexpected requ
       clearTimeout() {}, setTimeout() {},
       crypto: { randomUUID() { return (++modelSerial).toString(16).padStart(32, "0"); } },
     },
-    localStorage: { getItem() { return null; } },
+    localStorage: { getItem(key) { return stored.get(key) ?? null; }, setItem(key, value) { stored.set(key, value); } },
     document: {
+      documentElement: node("html"), body: node("body"),
       querySelector: node,
       querySelectorAll(selector) {
         if (selector === ".nav-item, [data-open-view]") return [nav];
@@ -96,8 +106,91 @@ function workspaceSandbox(fetch = async () => { throw new Error("Unexpected requ
     console, fetch,
   });
   vm.runInContext(source, sandbox, { filename: "app.js" });
-  return { sandbox, node, nav };
+  return { sandbox, node, nav, stored };
 }
+
+test("workspace panels hide independently and retain recovery controls", () => {
+  const { sandbox, node, stored } = workspaceSandbox();
+  vm.runInContext('bindEvents(); applyInspectorState(); switchInspectorTab("instance");', sandbox);
+  node("#conversation-toggle").listeners.get("click")[0]();
+  assert.equal(node("#workspace-grid").classList.contains("conversation-hidden"), true);
+  assert.equal(node("#conversation-toggle").attributes.get("aria-expanded"), "false");
+  assert.equal(stored.get("webweave-conversation-hidden"), "true");
+  node("#preview-toolbar-toggle").listeners.get("click")[0]();
+  assert.equal(node("#workspace-grid").classList.contains("preview-toolbar-hidden"), true);
+  vm.runInContext('switchInspectorTab("files")', sandbox);
+  assert.equal(node("#workspace-grid").classList.contains("preview-toolbar-hidden"), false);
+  assert.equal(node("#preview-toolbar-toggle").disabled, true);
+  vm.runInContext('switchInspectorTab("instance")', sandbox);
+  assert.equal(node("#workspace-grid").classList.contains("preview-toolbar-hidden"), true);
+  node("#preview-toolbar-toggle").listeners.get("click")[0]();
+  assert.equal(node("#workspace-grid").classList.contains("preview-toolbar-hidden"), false);
+  node("#inspector-toggle").listeners.get("click")[0]();
+  assert.equal(node("#workspace-grid").classList.contains("inspector-hidden"), true);
+  assert.equal(node("#workspace-grid").classList.contains("conversation-hidden"), false);
+  node("#conversation-toggle").listeners.get("click")[0]();
+  assert.equal(node("#workspace-grid").classList.contains("inspector-hidden"), false);
+  assert.equal(node("#workspace-grid").classList.contains("conversation-hidden"), true);
+  node("#conversation-rail").listeners.get("click")[0]();
+  assert.equal(node("#workspace-grid").classList.contains("conversation-hidden"), false);
+  assert.equal(node("#conversation-toggle").attributes.get("aria-expanded"), "true");
+});
+
+test("workspace divider expands preview and drags the conversation closed and open", () => {
+  const { sandbox, node, stored } = workspaceSandbox();
+  node("#workspace-grid").bounds = { left: 60, right: 1260, width: 1200 };
+  vm.runInContext("bindResize()", sandbox);
+  const handle = node("#resize-handle");
+  const emit = (type, clientX, pointerId = 1) => {
+    const event = { type, clientX, pointerId, button: 0, preventDefault() {} };
+    [...(handle.listeners.get(type) || [])].forEach((listener) => listener(event));
+  };
+  emit("pointerdown", 860);
+  emit("pointermove", 400, 2);
+  assert.equal(vm.runInContext("state.inspectorWidth", sandbox), 400);
+  emit("pointermove", 400);
+  assert.equal(vm.runInContext("state.inspectorWidth", sandbox), 856);
+  emit("pointermove", 85);
+  assert.equal(vm.runInContext("state.conversationHidden", sandbox), true);
+  emit("pointermove", 500);
+  assert.equal(vm.runInContext("state.conversationHidden", sandbox), false);
+  assert.equal(vm.runInContext("state.inspectorWidth", sandbox), 756);
+  emit("pointerup", 500);
+  assert.equal(stored.get("webweave-inspector-width"), "756");
+  assert.equal(node("body").classList.contains("is-resizing"), false);
+  assert.equal(handle.hasPointerCapture(1), false);
+  for (const type of ["pointermove", "pointerup", "pointercancel", "lostpointercapture"]) {
+    assert.equal(handle.listeners.get(type).length, 0);
+  }
+});
+
+test("workspace divider cancels cleanly and supports keyboard and narrow screens", () => {
+  for (const endType of ["pointercancel", "lostpointercapture"]) {
+    const { sandbox, node } = workspaceSandbox();
+    vm.runInContext("bindResize()", sandbox);
+    const handle = node("#resize-handle");
+    handle.bounds = { left: 596, width: 8 };
+    handle.listeners.get("pointerdown")[0]({ pointerId: 1, button: 0, preventDefault() {} });
+    handle.listeners.get(endType)[0]({ type: endType, pointerId: 1 });
+    assert.equal(node("body").classList.contains("is-resizing"), false);
+    assert.equal(handle.listeners.get("pointermove").length, 0);
+    const key = (key) => handle.listeners.get("keydown")[0]({ key, preventDefault() {} });
+    key("ArrowLeft");
+    assert.equal(vm.runInContext("state.inspectorWidth", sandbox), 428);
+    key("Home");
+    assert.equal(vm.runInContext("state.conversationHidden", sandbox), true);
+    key("ArrowRight");
+    assert.equal(vm.runInContext("state.conversationHidden", sandbox), false);
+    key("End");
+    assert.equal(vm.runInContext("state.inspectorHidden", sandbox), true);
+    assert.equal(vm.runInContext("state.conversationHidden", sandbox), false);
+    vm.runInContext("setInspectorHidden(false); window.innerWidth = 700;", sandbox);
+    handle.listeners.get("pointerdown")[0]({ pointerId: 2, button: 0, preventDefault() {} });
+    assert.equal(node("body").classList.contains("is-resizing"), false);
+    key("Home");
+    assert.equal(vm.runInContext("state.conversationHidden", sandbox), false);
+  }
+});
 
 test("workspace navigation shows empty state without creating a run", async () => {
   const { sandbox, node, nav } = workspaceSandbox();
@@ -108,6 +201,161 @@ test("workspace navigation shows empty state without creating a run", async () =
   assert.equal(node("#workspace-grid").hidden, true);
   assert.equal(node(".workspace-header").hidden, true);
   assert.equal(vm.runInContext("state.activeRunId", sandbox), null);
+});
+
+test("preview selection retains multiple targets and adds atomic cards without editing text", () => {
+  const { sandbox, node } = workspaceSandbox();
+  const messages = [];
+  const origin = "http://127.0.0.1:8765";
+  sandbox.window.location.origin = origin;
+  const frame = { postMessage(message) { messages.push(message); } };
+  node("#instance-frame").contentWindow = frame;
+  vm.runInContext('state.activeRunId = "selection-run"; state.activeRun = { instances: [{ instance_id: "preview", revision: 2 }] }; state.selectedInstanceId = "preview"; promptInput.value = "保留这段修改要求";', sandbox);
+  const selections = [
+    { selection_id: "one", ordinal: 1, component: "导航", selector: "#navigation", text: "导航文字" },
+    { selection_id: "two", ordinal: 2, component: "标题", selector: ".hero > h1", point: { x: 15, y: 30 } },
+  ];
+  const receive = (selection, mode, source = frame) => {
+    sandbox.previewEvent = { origin, source, data: { type: "webweave:selection", mode, selection } };
+    vm.runInContext("receivePreviewMessage(previewEvent)", sandbox);
+  };
+  receive(selections[0], "component", {});
+  assert.equal(vm.runInContext("state.selections.length", sandbox), 0);
+  receive(selections[0], "component");
+  receive(selections[1], "point");
+  receive(selections[0], "component");
+  assert.equal(node("#selection-list").children.length, 2);
+  vm.runInContext("injectSelectionIntoPrompt(); injectSelectionIntoPrompt()", sandbox);
+  assert.equal(node("#prompt-input").value, "保留这段修改要求");
+  assert.equal(node("#context-card-list").children.length, 2);
+  assert.equal(vm.runInContext("state.selections.length", sandbox), 2);
+  assert.equal(vm.runInContext("state.pendingContexts[0].instance_id", sandbox), "preview");
+  assert.equal(messages.some(message => message.type === "webweave:clear-selection"), false);
+  const card = node("#context-card-list").children[0];
+  card.children.at(-1).listeners.get("click")[0]();
+  assert.equal(vm.runInContext("state.pendingContexts.length", sandbox), 1);
+  const selected = node("#selection-list").children[0];
+  selected.children.at(-1).listeners.get("click")[0]();
+  assert.equal(vm.runInContext("state.selections.length", sandbox), 1);
+  assert.equal(messages.at(-1).type, "webweave:remove-selection");
+  vm.runInContext("clearSelection()", sandbox);
+  assert.equal(node("#selection-context").hidden, true);
+  assert.equal(node("#selection-list").children.length, 0);
+  assert.equal(node("#prompt-input").value, "保留这段修改要求");
+});
+
+test("preview selection drag accepts component and point IDs and preserves file drops", () => {
+  const { sandbox, node } = workspaceSandbox();
+  sandbox.contexts = [
+    { selection_id: "component", type: "component", run_id: "selection-run", component: "标题", selector: "#hero" },
+    { selection_id: "point", type: "point", run_id: "selection-run", component: "按钮", selector: "#button", point: { x: 80, y: 50 } },
+  ];
+  vm.runInContext('state.activeRunId = "selection-run"; state.selections = contexts; promptInput.value = "正文"; bindEvents(); renderSelections();', sandbox);
+  const data = new Map();
+  const transfer = { files: [], setData(type, value) { data.set(type, value); }, getData(type) { return data.get(type) || ""; } };
+  const drop = () => node(".composer").listeners.get("drop")[0]({ preventDefault() {}, dataTransfer: transfer });
+  for (const card of node("#selection-list").children) {
+    card.listeners.get("dragstart")[0]({ dataTransfer: transfer });
+    assert.equal(data.get("application/x-webweave-selection"), card.dataset.selectionId);
+    drop();
+    drop();
+  }
+  assert.equal(node("#context-card-list").children.length, 2);
+  assert.equal(node("#prompt-input").value, "正文");
+  data.set("application/x-webweave-selection", "unknown-or-cross-run");
+  drop();
+  assert.equal(vm.runInContext("state.pendingContexts.length", sandbox), 2);
+  data.clear();
+  transfer.files = [{ name: "reference.png" }];
+  drop();
+  assert.equal(node("#attachment-list").children.length, 1);
+  assert.equal(vm.runInContext("state.pendingFiles[0].name", sandbox), "reference.png");
+});
+
+test("preview selection sends structured context and renders history as cards", async () => {
+  const requests = [];
+  const { sandbox, node } = workspaceSandbox(async (url, options) => {
+    requests.push({ url, body: JSON.parse(options.body) });
+    return { ok: true, headers: { get() { return "application/json"; } }, json: async () => ({ ok: true }) };
+  });
+  sandbox.contexts = [
+    { selection_id: "one", type: "component", component: "导航", selector: "#navigation", run_id: "selection-run" },
+    { selection_id: "two", type: "point", component: "标题", selector: ".hero > h1", point: { x: 15, y: 30 }, run_id: "selection-run" },
+  ];
+  vm.runInContext('state.activeRunId = "selection-run"; state.activeRun = {}; state.pendingContexts = [...contexts]; state.selections = [...contexts]; promptInput.value = "改成深色"; loadActiveRun = async () => {};', sandbox);
+  await vm.runInContext("handlePrimaryAction()", sandbox);
+  assert.equal(requests[0].body.content, "改成深色");
+  assert.deepEqual(requests[0].body.instance_context, sandbox.contexts);
+  assert.equal(vm.runInContext("state.pendingContexts.length", sandbox), 0);
+  assert.equal(vm.runInContext("state.selections.length", sandbox), 2);
+  const article = vm.runInContext('createUserMessage({ display_text: "改成深色", instance_context: contexts })', sandbox);
+  const cards = article.querySelectorAll(".context-card");
+  assert.equal(cards.length, 2);
+  assert.equal(cards[0].querySelector(".context-card-copy").children[0].textContent.includes("#navigation"), false);
+  assert.equal(cards[1].querySelector(".context-card-copy").children[1].textContent, "位置 (15, 30)");
+  assert.equal(node("#context-card-list").children.length, 0);
+});
+
+test("instance deletion confirms the selected target and switches to the remaining instance", async () => {
+  const requests = [];
+  const { sandbox, node } = workspaceSandbox(async (url, options) => {
+    requests.push({ url, options });
+    return { ok: true, headers: { get() { return "application/json"; } }, json: async () => ({ ok: true }) };
+  });
+  vm.runInContext(`
+    state.activeRunId = "delete-run";
+    state.activeRun = { instances: [
+      { instance_id: "first", status: "stopped" },
+      { instance_id: "second", status: "stopped" },
+    ], instance: { instance_id: "second" } };
+    state.selectedInstanceId = "first";
+    loadActiveRun = async () => { state.activeRun.instances.shift(); };
+    renderInstances(state.activeRun);
+    bindEvents();
+  `, sandbox);
+  assert.equal(node("#instance-delete").disabled, false);
+  sandbox.window.confirm = () => false;
+  await node("#instance-delete").listeners.get("click")[0]();
+  assert.equal(requests.length, 0);
+  sandbox.window.confirm = () => true;
+  await node("#instance-delete").listeners.get("click")[0]();
+  assert.equal(requests[0].url, "/api/runs/delete-run/instance");
+  assert.deepEqual(JSON.parse(requests[0].options.body), { action: "delete", instance_id: "first", timeout: 30 });
+  assert.equal(vm.runInContext("state.selectedInstanceId", sandbox), "second");
+  assert.equal(vm.runInContext("state.instanceBusy", sandbox), false);
+  assert.equal(node("#instance-delete").disabled, false);
+  vm.runInContext(`
+    state.activeRun = { instances: [], instance: null };
+    renderInstances(state.activeRun);
+  `, sandbox);
+  assert.equal(vm.runInContext("state.selectedInstanceId", sandbox), null);
+  assert.equal(node("#instance-delete").disabled, true);
+  assert.equal(node("#instance-empty").hidden, false);
+  await vm.runInContext('instanceAction("delete")', sandbox);
+  assert.equal(requests.length, 1);
+});
+
+test("instance deletion disables repeated actions and recovers after failure", async () => {
+  let requests = 0;
+  let fail;
+  const { sandbox, node } = workspaceSandbox(() => {
+    requests++;
+    return new Promise((resolve, reject) => { fail = reject; });
+  });
+  vm.runInContext(`
+    state.activeRunId = "delete-run";
+    state.activeRun = { instances: [{ instance_id: "first", status: "running" }] };
+    state.selectedInstanceId = "first";
+  `, sandbox);
+  const pending = vm.runInContext('instanceAction("delete")', sandbox);
+  assert.equal(node("#instance-delete").disabled, true);
+  await vm.runInContext('instanceAction("delete")', sandbox);
+  assert.equal(requests, 1);
+  fail(new Error("停止失败"));
+  await assert.rejects(pending, /停止失败/);
+  assert.equal(vm.runInContext("state.instanceBusy", sandbox), false);
+  assert.equal(vm.runInContext("state.selectedInstanceId", sandbox), "first");
+  assert.equal(node("#instance-delete").disabled, false);
 });
 
 test("template creation opens a conversation with a persisted template agent", async () => {

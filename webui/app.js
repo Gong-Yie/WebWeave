@@ -5,7 +5,7 @@ const state = {
   action: "idle",
   pendingFiles: [],
   pendingContexts: [],
-  selection: null,
+  selections: [],
   currentFileText: "",
   renderedRunKey: "",
   frameKey: "",
@@ -15,6 +15,9 @@ const state = {
   inspectorHidden:
     window.innerWidth <= 720 ||
     localStorage.getItem("webweave-inspector-hidden") === "true",
+  conversationHidden: localStorage.getItem("webweave-conversation-hidden") === "true",
+  previewToolbarHidden: localStorage.getItem("webweave-preview-toolbar-hidden") === "true",
+  inspectorTab: "activity",
   sidebarCollapsed:
     window.innerWidth <= 960 ||
     localStorage.getItem("webweave-sidebar-collapsed") === "true",
@@ -51,6 +54,8 @@ const appShell = $(".app-shell");
 const workspaceGrid = $("#workspace-grid");
 const sidebarToggle = $("#sidebar-toggle");
 const inspectorToggle = $("#inspector-toggle");
+const conversationToggle = $("#conversation-toggle");
+const previewToolbarToggle = $("#preview-toolbar-toggle");
 const inspectorRail = $("#inspector-rail");
 const closeInspector = $("#close-inspector");
 const resizeHandle = $("#resize-handle");
@@ -63,6 +68,7 @@ const composer = $(".composer");
 const toast = $("#toast");
 const instanceFrame = $("#instance-frame");
 const selectionContext = $("#selection-context");
+const previewSelectionMime = "application/x-webweave-selection";
 
 function refreshIcons() {
   if (window.lucide) window.lucide.createIcons();
@@ -246,21 +252,39 @@ function applySidebarState() {
 }
 
 function applyInspectorState() {
+  if (state.inspectorHidden) state.conversationHidden = false;
   document.documentElement.style.setProperty(
     "--inspector-width",
     `${state.inspectorWidth}px`,
   );
   workspaceGrid.classList.toggle("inspector-hidden", state.inspectorHidden);
+  workspaceGrid.classList.toggle("conversation-hidden", state.conversationHidden);
+  workspaceGrid.classList.toggle("preview-toolbar-hidden", state.previewToolbarHidden && state.inspectorTab === "instance");
   const label = state.inspectorHidden ? "展开执行检查区" : "隐藏执行检查区";
   inspectorToggle.replaceChildren(
     icon(state.inspectorHidden ? "panel-right-open" : "panel-right-close"),
   );
   inspectorToggle.title = label;
   inspectorToggle.setAttribute("aria-label", label);
+  inspectorToggle.setAttribute("aria-expanded", String(!state.inspectorHidden));
+  const conversationLabel = state.conversationHidden ? "展开对话" : "隐藏对话";
+  conversationToggle.replaceChildren(icon(state.conversationHidden ? "panel-left-open" : "panel-left-close"));
+  conversationToggle.title = conversationLabel;
+  conversationToggle.setAttribute("aria-label", conversationLabel);
+  conversationToggle.setAttribute("aria-expanded", String(!state.conversationHidden));
+  const toolbarLabel = state.previewToolbarHidden ? "展开预览工具栏" : "隐藏预览工具栏";
+  previewToolbarToggle.replaceChildren(icon(state.previewToolbarHidden ? "panel-top-open" : "panel-top-close"));
+  previewToolbarToggle.title = toolbarLabel;
+  previewToolbarToggle.setAttribute("aria-label", toolbarLabel);
+  previewToolbarToggle.setAttribute("aria-expanded", String(!state.previewToolbarHidden));
+  previewToolbarToggle.disabled = state.inspectorHidden || state.inspectorTab !== "instance";
+  updateResizeValue();
   localStorage.setItem(
     "webweave-inspector-hidden",
     String(state.inspectorHidden),
   );
+  localStorage.setItem("webweave-conversation-hidden", String(state.conversationHidden));
+  localStorage.setItem("webweave-preview-toolbar-hidden", String(state.previewToolbarHidden));
   refreshIcons();
 }
 
@@ -269,13 +293,21 @@ function setInspectorHidden(hidden) {
   applyInspectorState();
 }
 
+function setConversationHidden(hidden) {
+  state.conversationHidden = hidden;
+  if (hidden) state.inspectorHidden = false;
+  applyInspectorState();
+}
+
 function switchInspectorTab(tabName) {
+  state.inspectorTab = tabName;
   document.querySelectorAll(".inspector-tab").forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.tab === tabName);
   });
   document.querySelectorAll(".inspector-panel").forEach((panel) => {
     panel.classList.toggle("is-active", panel.id === `${tabName}-panel`);
   });
+  applyInspectorState();
 }
 
 function formatTime(value) {
@@ -481,7 +513,7 @@ async function deleteRun(runId) {
     state.frameKey = "";
     state.pendingFiles = [];
     state.pendingContexts = [];
-    state.selection = null;
+    state.selections = [];
     selectionContext.hidden = true;
     renderPendingContext();
     switchView("workspace");
@@ -505,7 +537,7 @@ async function activateRun(runId) {
   state.runFiles = [];
   state.renderedRunKey = "";
   state.frameKey = "";
-  state.selection = null;
+  state.selections = [];
   state.pendingFiles = [];
   state.pendingContexts = [];
   promptInput.value = "";
@@ -926,6 +958,13 @@ function createUserMessage(payload) {
     });
     body.append(files);
   }
+  if (Array.isArray(payload.instance_context) && payload.instance_context.length) {
+    const contexts = element("div", "context-card-list message-context-cards");
+    payload.instance_context.forEach((context) => {
+      if (context && ["component", "point"].includes(context.type)) contexts.append(createContextCard(context));
+    });
+    body.append(contexts);
+  }
   article.append(body);
   return article;
 }
@@ -1139,6 +1178,8 @@ function addPendingFiles(files) {
 
 function renderPendingContext() {
   attachmentList.replaceChildren();
+  const contexts = $("#context-card-list");
+  contexts.replaceChildren();
   state.pendingFiles.forEach((file, index) => {
     attachmentList.append(
       pendingChip("file", file.name, () => {
@@ -1148,17 +1189,59 @@ function renderPendingContext() {
     );
   });
   state.pendingContexts.forEach((context, index) => {
-    const label = context.type === "component"
-      ? `组件 ${context.component}`
-      : `定点 (${context.point?.x}, ${context.point?.y})`;
-    attachmentList.append(
-      pendingChip(context.type === "component" ? "scan-search" : "crosshair", label, () => {
+    contexts.append(
+      createContextCard(context, { draggable: true, onRemove: () => {
         state.pendingContexts.splice(index, 1);
         renderPendingContext();
-      }),
+      } }),
     );
   });
   refreshIcons();
+}
+
+function createContextCard(context, { onRemove = null, draggable = false } = {}) {
+  const kind = context.type === "component" ? "组件" : "定点";
+  const label = `${kind}${context.ordinal ? ` ${context.ordinal}` : ""} · ${context.component || context.tag || "页面"}`;
+  const card = element("div", "context-card");
+  card.dataset.type = context.type;
+  card.dataset.selectionId = context.selection_id || "";
+  const copy = element("div", "context-card-copy");
+  copy.append(element("strong", "", label));
+  const description = context.type === "point"
+    ? `位置 (${context.point?.x}, ${context.point?.y})`
+    : context.text || "网页中的组件";
+  copy.append(element("span", "", description));
+  card.append(icon(context.type === "component" ? "scan-search" : "crosshair"), copy);
+  if (onRemove) {
+    const remove = element("button", "icon-button subtle");
+    remove.type = "button";
+    remove.title = `移除${kind}`;
+    remove.setAttribute("aria-label", `移除${label}`);
+    remove.append(icon("x"));
+    remove.addEventListener("click", onRemove);
+    card.append(remove);
+  }
+  if (draggable && context.selection_id) {
+    card.draggable = true;
+    card.title = "拖入对话输入区";
+    card.addEventListener("dragstart", (event) => {
+      event.dataTransfer.effectAllowed = "copy";
+      event.dataTransfer.setData(previewSelectionMime, context.selection_id);
+      event.dataTransfer.setData("text/plain", label);
+      if (state.conversationHidden) setConversationHidden(false);
+    });
+  }
+  return card;
+}
+
+function addPendingContexts(contexts) {
+  contexts.forEach((context) => {
+    if (context.run_id === state.activeRunId && !state.pendingContexts.some(item => item.selection_id === context.selection_id)) {
+      state.pendingContexts.push(context);
+    }
+  });
+  renderPendingContext();
+  promptInput.focus();
 }
 
 function pendingChip(iconName, label, onRemove) {
@@ -1311,6 +1394,7 @@ function renderInstance(instance) {
     $(selector).disabled = !active || state.instanceBusy;
   });
   $("#instance-restart").disabled = !instance || state.instanceBusy;
+  $("#instance-delete").disabled = !instance || state.instanceBusy;
   $("#instance-empty").textContent = instance ? "当前实例未运行，可点击上方重启按钮启动" : "当前对话没有运行中的实例";
   if (!active) {
     instanceFrame.removeAttribute("src");
@@ -1329,6 +1413,10 @@ async function instanceAction(action) {
   if (!state.activeRunId || state.instanceBusy) return;
   const runId = state.activeRunId;
   const instanceId = action === "start" ? undefined : state.selectedInstanceId;
+  if (action === "delete") {
+    if (!instanceId || !currentInstance()) return;
+    if (!window.confirm("确定删除当前实例？运行中的实例会先停止，生成文件和启动配置会保留。")) return;
+  }
   state.instanceBusy = true;
   renderInstance(currentInstance());
   try {
@@ -1340,6 +1428,10 @@ async function instanceAction(action) {
     if (action === "start") showToast("实例已启动");
     if (action === "restart") showToast("实例已重启");
     if (action === "stop") showToast("实例已停止");
+    if (action === "delete") {
+      showToast("实例已删除");
+      clearSelection();
+    }
     if (action === "start") state.selectedInstanceId = payload.instance_id;
     await loadActiveRun(true);
   } finally {
@@ -1364,30 +1456,46 @@ function receivePreviewMessage(event) {
     return;
   }
   if (event.data?.type === "webweave:preview-ready") {
+    state.selections = [];
+    renderSelections();
     setInspectMode(state.inspectMode);
     return;
   }
-  if (event.data?.type !== "webweave:selection") return;
+  if (event.data?.type === "webweave:selection-drag") {
+    if (state.selections.some(item => item.selection_id === event.data.selection_id) && state.conversationHidden) setConversationHidden(false);
+    return;
+  }
+  if (event.data?.type !== "webweave:selection" || !["component", "point"].includes(event.data.mode) || typeof event.data.selection?.selection_id !== "string") return;
   const selection = {
+    ...event.data.selection,
     type: event.data.mode,
     run_id: state.activeRunId,
+    instance_id: currentInstance()?.instance_id || null,
+    revision: currentInstance()?.revision || null,
     app_url: currentInstance()?.app_url || null,
-    ...event.data.selection,
   };
-  renderSelection(selection);
+  if (!state.selections.some(item => item.selection_id === selection.selection_id)) state.selections.push(selection);
+  renderSelections();
 }
 
-function renderSelection(selection) {
-  state.selection = selection;
-  selectionContext.hidden = false;
-  $("#selection-kind").textContent = selection.type === "component" ? "组件" : "定点";
-  $("#selection-title").textContent = selection.component || selection.tag;
-  $("#selection-detail").textContent = selection.source || selection.selector;
+function renderSelections() {
+  selectionContext.hidden = state.selections.length === 0;
+  $("#selection-kind").textContent = `已选 ${state.selections.length} 处`;
+  const list = $("#selection-list");
+  list.replaceChildren();
+  state.selections.forEach((selection) => {
+    list.append(createContextCard(selection, { draggable: true, onRemove: () => {
+      state.selections = state.selections.filter(item => item.selection_id !== selection.selection_id);
+      instanceFrame.contentWindow?.postMessage({ type: "webweave:remove-selection", selection_id: selection.selection_id }, window.location.origin);
+      renderSelections();
+    } }));
+  });
+  refreshIcons();
 }
 
 function clearSelection() {
-  state.selection = null;
-  selectionContext.hidden = true;
+  state.selections = [];
+  renderSelections();
   instanceFrame.contentWindow?.postMessage(
     { type: "webweave:clear-selection" },
     window.location.origin,
@@ -1396,32 +1504,9 @@ function clearSelection() {
 }
 
 function injectSelectionIntoPrompt() {
-  if (!state.selection) return;
-  const selection = state.selection;
-  let context;
-  if (selection.type === "component") {
-    context = [
-      "[组件评价]",
-      `组件: ${selection.component}`,
-      `选择器: ${selection.selector}`,
-      selection.source ? `源码: ${selection.source}` : null,
-      "修改要求: ",
-    ].filter(Boolean).join("\n");
-  } else {
-    context = [
-      "[定点评价]",
-      `位置: x=${selection.point?.x}, y=${selection.point?.y}`,
-      `目标: ${selection.component} (${selection.selector})`,
-      "评价: ",
-    ].join("\n");
-  }
-  const current = promptInput.value.trim();
-  promptInput.value = current ? `${current}\n\n${context}` : context;
-  state.pendingContexts.push(selection);
-  renderPendingContext();
-  clearSelection();
-  promptInput.focus();
-  promptInput.setSelectionRange(promptInput.value.length, promptInput.value.length);
+  if (!state.selections.length) return;
+  if (state.conversationHidden) setConversationHidden(false);
+  addPendingContexts(state.selections);
 }
 
 const effortLabels = { none: "关闭", minimal: "最少", low: "低", medium: "中", high: "高", xhigh: "更高", max: "最高" };
@@ -2003,6 +2088,12 @@ function bindEvents() {
   inspectorToggle.addEventListener("click", () => setInspectorHidden(!state.inspectorHidden));
   inspectorRail.addEventListener("click", () => setInspectorHidden(false));
   closeInspector.addEventListener("click", () => setInspectorHidden(true));
+  conversationToggle.addEventListener("click", () => setConversationHidden(!state.conversationHidden));
+  $("#conversation-rail").addEventListener("click", () => setConversationHidden(false));
+  previewToolbarToggle.addEventListener("click", () => {
+    state.previewToolbarHidden = !state.previewToolbarHidden;
+    applyInspectorState();
+  });
   $("#activity-refresh").addEventListener("click", () => runSafely(() => loadActiveRun(true)));
   $("#files-refresh").addEventListener("click", () => runSafely(loadFiles));
   $("#back-to-tree").addEventListener("click", () => {
@@ -2027,6 +2118,12 @@ function bindEvents() {
   composer.addEventListener("drop", (event) => {
     event.preventDefault();
     composer.classList.remove("is-dragging");
+    const selectionId = event.dataTransfer.getData(previewSelectionMime);
+    if (selectionId) {
+      const selection = [...state.selections, ...state.pendingContexts].find(item => item.selection_id === selectionId);
+      if (selection) addPendingContexts([selection]);
+      return;
+    }
     addPendingFiles(event.dataTransfer.files);
   });
   promptInput.addEventListener("input", () => {
@@ -2085,6 +2182,7 @@ function bindEvents() {
   $("#instance-restart").addEventListener("click", () => runSafely(() => instanceAction("restart")));
   $("#instance-start").addEventListener("click", () => runSafely(() => instanceAction("start")));
   $("#instance-stop").addEventListener("click", () => runSafely(() => instanceAction("stop")));
+  $("#instance-delete").addEventListener("click", () => runSafely(() => instanceAction("delete")));
   $("#instance-open").addEventListener("click", () => {
     const url = currentInstance()?.app_url;
     if (url) window.open(url, "_blank", "noopener,noreferrer");
@@ -2117,29 +2215,57 @@ function bindEvents() {
     const isMobile = window.innerWidth <= 720;
     if (isMobile && !wasMobile) setInspectorHidden(true);
     wasMobile = isMobile;
+    updateResizeValue();
   });
   bindResize();
 }
 
+function updateResizeValue() {
+  const bounds = workspaceGrid.getBoundingClientRect();
+  const width = state.conversationHidden ? bounds.width - 50 : Math.min(state.inspectorWidth, bounds.width - 248);
+  const percent = bounds.width > 0 ? Math.round(Math.max(0, width) / bounds.width * 100) : 0;
+  resizeHandle.setAttribute("aria-valuenow", String(percent));
+  resizeHandle.setAttribute("aria-valuetext", state.conversationHidden ? "对话已隐藏" : `检查区宽度 ${percent}%`);
+}
+
+function resizeWorkspace(clientX) {
+  const bounds = workspaceGrid.getBoundingClientRect();
+  if (clientX - bounds.left <= 80) {
+    if (!state.conversationHidden) setConversationHidden(true);
+    return;
+  }
+  state.inspectorWidth = Math.max(280, Math.min(bounds.right - clientX - 4, bounds.width - 248));
+  if (state.conversationHidden) setConversationHidden(false);
+  document.documentElement.style.setProperty("--inspector-width", `${state.inspectorWidth}px`);
+  updateResizeValue();
+}
+
 function bindResize() {
+  resizeHandle.addEventListener("keydown", (event) => {
+    if (window.innerWidth <= 720 || state.inspectorHidden) return;
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === "Home") setConversationHidden(true);
+    else if (event.key === "End") setInspectorHidden(true);
+    else if (state.conversationHidden) {
+      if (event.key === "ArrowRight") setConversationHidden(false);
+    } else {
+      const bounds = resizeHandle.getBoundingClientRect();
+      resizeWorkspace(bounds.left + bounds.width / 2 + (event.key === "ArrowLeft" ? -32 : 32));
+    }
+    localStorage.setItem("webweave-inspector-width", String(Math.round(state.inspectorWidth)));
+  });
   resizeHandle.addEventListener("pointerdown", (event) => {
-    if (window.innerWidth <= 720) return;
+    if (window.innerWidth <= 720 || state.inspectorHidden || event.button !== 0 || document.body.classList.contains("is-resizing")) return;
     event.preventDefault();
     document.body.classList.add("is-resizing");
     resizeHandle.setPointerCapture(event.pointerId);
     const onMove = (moveEvent) => {
-      const bounds = workspaceGrid.getBoundingClientRect();
-      const maximum = Math.min(720, bounds.width - 440);
-      state.inspectorWidth = Math.max(
-        280,
-        Math.min(bounds.right - moveEvent.clientX, maximum),
-      );
-      document.documentElement.style.setProperty(
-        "--inspector-width",
-        `${state.inspectorWidth}px`,
-      );
+      if (moveEvent.pointerId === event.pointerId) resizeWorkspace(moveEvent.clientX);
     };
-    const onEnd = () => {
+    const onEnd = (endEvent) => {
+      if (endEvent.pointerId !== event.pointerId) return;
+      if (endEvent.type === "pointerup") resizeWorkspace(endEvent.clientX);
       document.body.classList.remove("is-resizing");
       localStorage.setItem(
         "webweave-inspector-width",
@@ -2147,9 +2273,15 @@ function bindResize() {
       );
       resizeHandle.removeEventListener("pointermove", onMove);
       resizeHandle.removeEventListener("pointerup", onEnd);
+      resizeHandle.removeEventListener("pointercancel", onEnd);
+      resizeHandle.removeEventListener("lostpointercapture", onEnd);
+      if (resizeHandle.hasPointerCapture(event.pointerId)) resizeHandle.releasePointerCapture(event.pointerId);
+      updateResizeValue();
     };
     resizeHandle.addEventListener("pointermove", onMove);
     resizeHandle.addEventListener("pointerup", onEnd);
+    resizeHandle.addEventListener("pointercancel", onEnd);
+    resizeHandle.addEventListener("lostpointercapture", onEnd);
   });
 }
 

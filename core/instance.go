@@ -131,6 +131,9 @@ func (a *App) instanceAction(ctx context.Context, id string, args tools.Args) (i
 	if args.Action == "" {
 		args.Action = "status"
 	}
+	if args.Action == "delete" && args.InstanceID == "" {
+		return instanceResult{}, instanceError{"INVALID_ARGUMENT", "删除实例必须指定 instance_id", nil}
+	}
 	if args.Action == "start" && args.Command == "" {
 		if args.Cwd != "" || args.Port != nil || args.HealthPath != "" {
 			return instanceResult{}, instanceError{"INVALID_ARGUMENT", "使用启动文件时不接受额外启动参数", record}
@@ -196,6 +199,11 @@ func (a *App) instanceAction(ctx context.Context, id string, args tools.Args) (i
 		}
 	case "stop":
 		err = a.stopInstance(ctx, run, record)
+	case "delete":
+		err = a.stopInstance(ctx, run, record)
+		if err == nil {
+			err = run.store.deleteInstance(record.InstanceID)
+		}
 	case "restart":
 		err = a.stopInstance(ctx, run, record)
 		if err == nil {
@@ -203,7 +211,7 @@ func (a *App) instanceAction(ctx context.Context, id string, args tools.Args) (i
 			record, err = a.startInstance(ctx, run, tools.Args{Command: record.Command, Cwd: record.Cwd, Port: &port, HealthPath: record.HealthPath}, record)
 		}
 	default:
-		err = instanceError{"INVALID_ARGUMENT", "action 必须是 start、status、stop 或 restart", record}
+		err = instanceError{"INVALID_ARGUMENT", "action 必须是 start、status、stop、restart 或 delete", record}
 	}
 	if err != nil {
 		return instanceResult{}, err

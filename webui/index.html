@@ -110,12 +110,15 @@
             <div class="active-run-heading"><strong id="active-run-title">新对话</strong><span id="active-run-id">尚未选择</span></div>
             <div class="header-actions">
               <span class="run-status"><span></span>等待输入</span>
-              <button id="inspector-toggle" class="icon-button" type="button" title="隐藏执行检查区" aria-label="隐藏执行检查区"><i data-lucide="panel-right-close"></i></button>
+              <button id="conversation-toggle" class="icon-button" type="button" title="隐藏对话" aria-label="隐藏对话" aria-controls="conversation" aria-expanded="true"><i data-lucide="panel-left-close"></i></button>
+              <button id="preview-toolbar-toggle" class="icon-button" type="button" title="隐藏预览工具栏" aria-label="隐藏预览工具栏" aria-controls="inspector-header" aria-expanded="true" disabled><i data-lucide="panel-top-close"></i></button>
+              <button id="inspector-toggle" class="icon-button" type="button" title="隐藏执行检查区" aria-label="隐藏执行检查区" aria-controls="inspector" aria-expanded="true"><i data-lucide="panel-right-close"></i></button>
             </div>
           </header>
 
           <div id="workspace-grid" class="workspace-grid">
-            <section class="conversation" aria-label="对话内容">
+            <button id="conversation-rail" class="conversation-rail" type="button" title="展开对话" aria-label="展开对话"><i data-lucide="panel-left-open"></i><span>对话</span></button>
+            <section id="conversation" class="conversation" aria-label="对话内容">
               <div id="conversation-scroll" class="conversation-scroll"></div>
               <div class="composer-wrap">
                 <form id="template-save-form" class="template-save-form" hidden>
@@ -125,6 +128,7 @@
                 </form>
                 <div id="attachment-list" class="attachment-list"></div>
                 <div class="composer">
+                  <div id="context-card-list" class="context-card-list" aria-label="已加入的组件和定点"></div>
                   <textarea id="prompt-input" rows="4" placeholder="描述你想构建或修改的内容" aria-label="任务输入"></textarea>
                   <div class="composer-toolbar">
                     <div class="composer-left">
@@ -147,10 +151,10 @@
               </div>
             </section>
 
-            <div id="resize-handle" class="resize-handle" aria-label="调整检查区宽度"></div>
+            <div id="resize-handle" class="resize-handle" role="separator" tabindex="0" aria-label="调整对话和检查区宽度" aria-orientation="vertical" aria-controls="conversation inspector" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" title="左右拖动调整宽度，拖到最左侧隐藏对话；方向键调整，Home 隐藏对话，End 隐藏检查区"></div>
 
             <aside id="inspector" class="inspector" aria-label="执行检查区">
-              <header class="inspector-header">
+              <header id="inspector-header" class="inspector-header">
                 <div class="inspector-tabs" role="tablist">
                   <button class="inspector-tab is-active" data-tab="activity" type="button">执行</button>
                   <button class="inspector-tab" data-tab="subagents" type="button">子 Agent <span id="subagent-count">0</span></button>
@@ -223,7 +227,10 @@
                 </div>
                 <div class="instance-launchbar">
                   <span>使用已保存的启动配置运行项目</span>
-                  <button id="instance-start" class="button button-primary compact" type="button"><i data-lucide="play"></i><span id="instance-start-label">手动启动</span></button>
+                  <div class="instance-launch-actions">
+                    <button id="instance-delete" class="button button-secondary compact" type="button" disabled><i data-lucide="trash-2"></i><span>删除当前实例</span></button>
+                    <button id="instance-start" class="button button-primary compact" type="button"><i data-lucide="play"></i><span id="instance-start-label">手动启动</span></button>
+                  </div>
                 </div>
                 <div class="instance-controls">
                   <div class="inspect-modes" aria-label="实例交互模式">
@@ -243,9 +250,10 @@
                 </div>
                 <div id="selection-context" class="selection-context" hidden>
                   <span id="selection-kind" class="selection-kind">组件</span>
-                  <div class="selection-copy"><strong id="selection-title"></strong><small id="selection-detail"></small></div>
-                  <button id="inject-selection" class="button button-primary compact" type="button"><i data-lucide="corner-left-up"></i>加入输入框</button>
-                  <button id="clear-selection" class="icon-button subtle" type="button" title="清除选择" aria-label="清除选择"><i data-lucide="x"></i></button>
+                  <div class="selection-copy"><strong>拖动标记或卡片到输入区</strong></div>
+                  <button id="inject-selection" class="button button-primary compact" type="button"><i data-lucide="corner-left-up"></i>全部加入</button>
+                  <button id="clear-selection" class="icon-button subtle" type="button" title="清除全部标记" aria-label="清除全部标记"><i data-lucide="x"></i></button>
+                  <div id="selection-list" class="context-card-list" aria-label="已选标记"></div>
                 </div>
               </div>
             </aside>

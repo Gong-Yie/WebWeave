@@ -1,1 +1,55 @@
-#ww-inspect-outline{position:fixed;z-index:2147483646;display:none;border:2px solid #1677ff;background:rgba(22,119,255,.08);pointer-events:none;box-sizing:border-box}#ww-inspect-point{position:absolute;z-index:2147483647;display:none;width:12px;height:12px;border:3px solid #fff;border-radius:50%;background:#c83d35;box-shadow:0 0 0 2px #c83d35;pointer-events:none;transform:translate(-50%,-50%)}html[data-ww-mode="component"] *,html[data-ww-mode="point"] *{cursor:crosshair!important}
+#ww-inspect-outline {
+  position: fixed;
+  z-index: 2147483645;
+  display: none;
+  border: 1px dashed #1677ff;
+  background: rgba(22, 119, 255, .04);
+  pointer-events: none;
+  box-sizing: border-box;
+}
+.ww-inspect-selection {
+  all: initial;
+  position: fixed;
+  z-index: 2147483646;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+.ww-inspect-selection[hidden] { display: none; }
+.ww-inspect-component {
+  border: 2px solid #1677ff;
+  background: rgba(22, 119, 255, .08);
+}
+.ww-inspect-drag {
+  all: initial;
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  display: block;
+  max-width: 180px;
+  overflow: hidden;
+  padding: 4px 7px;
+  border-radius: 4px 4px 0 0;
+  background: #1677ff;
+  color: #fff;
+  font: 12px/1.4 "Segoe UI", "Microsoft YaHei", sans-serif;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: auto;
+  transform: translateY(-100%);
+  user-select: none;
+}
+.ww-inspect-label-inside .ww-inspect-drag { transform: none; }
+.ww-inspect-point .ww-inspect-drag {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #c83d35;
+  box-shadow: 0 0 0 2px #c83d35;
+  text-align: center;
+  line-height: 22px;
+  transform: translate(-50%, -50%);
+}
+html[data-ww-mode="component"] *, html[data-ww-mode="point"] * { cursor: crosshair !important; }
+[data-ww-inspector-ui] .ww-inspect-drag { cursor: grab !important; }
