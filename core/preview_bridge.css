@@ -53,3 +53,19 @@
 }
 html[data-ww-mode="component"] *, html[data-ww-mode="point"] * { cursor: crosshair !important; }
 [data-ww-inspector-ui] .ww-inspect-drag { cursor: grab !important; }
+.ww-inspect-move {
+  all: initial;
+  position: fixed;
+  z-index: 2147483647;
+  padding: 5px 8px;
+  border: 1px solid #fff;
+  border-radius: 5px;
+  background: #126b5a;
+  color: #fff;
+  font: 12px/1.4 "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: move !important;
+  touch-action: none;
+  user-select: none;
+}
+.ww-inspect-move[hidden] { display: none; }
+.ww-inspect-move:focus-visible { outline: 2px solid #1677ff; outline-offset: 2px; }

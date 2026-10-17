@@ -69,6 +69,7 @@ const toast = $("#toast");
 const instanceFrame = $("#instance-frame");
 const selectionContext = $("#selection-context");
 const previewSelectionMime = "application/x-webweave-selection";
+let previewContextMenu = null;
 
 function refreshIcons() {
   if (window.lucide) window.lucide.createIcons();
@@ -1397,6 +1398,7 @@ function renderInstance(instance) {
   $("#instance-delete").disabled = !instance || state.instanceBusy;
   $("#instance-empty").textContent = instance ? "当前实例未运行，可点击上方重启按钮启动" : "当前对话没有运行中的实例";
   if (!active) {
+    closePreviewMenu();
     instanceFrame.removeAttribute("src");
     state.frameKey = "";
     clearSelection();
@@ -1404,6 +1406,7 @@ function renderInstance(instance) {
   }
   const frameKey = `${instance.instance_id}:${instance.revision}:${instance.preview_url}`;
   if (frameKey !== state.frameKey) {
+    closePreviewMenu();
     state.frameKey = frameKey;
     instanceFrame.src = instance.preview_url;
   }
@@ -1456,9 +1459,28 @@ function receivePreviewMessage(event) {
     return;
   }
   if (event.data?.type === "webweave:preview-ready") {
+    closePreviewMenu();
     state.selections = [];
     renderSelections();
     setInspectMode(state.inspectMode);
+    return;
+  }
+  if (event.data?.type === "webweave:close-menu") {
+    closePreviewMenu();
+    return;
+  }
+  if (event.data?.type === "webweave:context-menu") {
+    if (instanceFrame.hidden || !Number.isFinite(event.data.x) || !Number.isFinite(event.data.y)) return;
+    const rect = instanceFrame.getBoundingClientRect();
+    const scaleX = rect.width / (instanceFrame.offsetWidth || rect.width);
+    const scaleY = rect.height / (instanceFrame.offsetHeight || rect.height);
+    showPreviewMenu(rect.left + event.data.x * scaleX, rect.top + event.data.y * scaleY, event.data);
+    return;
+  }
+  if (event.data?.type === "webweave:selection-removed") {
+    state.selections = state.selections.filter(item => item.selection_id !== event.data.selection_id);
+    renderSelections();
+    closePreviewMenu();
     return;
   }
   if (event.data?.type === "webweave:selection-drag") {
@@ -1474,8 +1496,160 @@ function receivePreviewMessage(event) {
     revision: currentInstance()?.revision || null,
     app_url: currentInstance()?.app_url || null,
   };
-  if (!state.selections.some(item => item.selection_id === selection.selection_id)) state.selections.push(selection);
+  const index = state.selections.findIndex(item => item.selection_id === selection.selection_id);
+  if (index < 0) state.selections.push(selection);
+  else state.selections[index] = selection;
+  state.pendingContexts = state.pendingContexts.map(item => item.selection_id === selection.selection_id ? selection : item);
+  renderPendingContext();
   renderSelections();
+}
+
+function closePreviewMenu() {
+  previewContextMenu?.remove();
+  previewContextMenu = null;
+}
+
+function refreshInstancePreview() {
+  closePreviewMenu();
+  if (instanceFrame.getAttribute("src")) instanceFrame.contentWindow.location.reload();
+}
+
+function showPreviewMenu(x, y, context = {}) {
+  closePreviewMenu();
+  const menu = element("div", "preview-context-menu");
+  previewContextMenu = menu;
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "实例预览菜单");
+  menu.tabIndex = -1;
+  const instance = currentInstance();
+  const active = Boolean(instance && ["starting", "running", "unhealthy"].includes(instance.status) && !instanceFrame.hidden);
+  const frameKey = state.frameKey;
+  const selected = state.selections.find(item => item.selection_id === context.selection_id);
+  const components = (Array.isArray(context.components) ? context.components : []).filter(item =>
+    state.selections.some(selection => selection.type === "component" && selection.selection_id === item.selection_id));
+  menu.append(element("div", "preview-menu-heading", selected ? `${selected.type === "component" ? "组件" : "定点"} ${selected.ordinal || ""} · ${selected.component || selected.tag || "页面"}` : "实例预览"));
+
+  const position = () => {
+    const bounds = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - bounds.width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - bounds.height - 8))}px`;
+  };
+  const action = (name, entries = [], enabled) => {
+    instanceFrame.contentWindow?.postMessage({
+      type: "webweave:context-action", action: name, selection_ids: entries.map(item => item.selection_id), enabled,
+    }, window.location.origin);
+  };
+  const button = (container, label, iconName, callback, disabled = false) => {
+    const control = element("button", "preview-menu-item");
+    control.type = "button";
+    control.setAttribute("role", "menuitem");
+    control.disabled = disabled;
+    control.append(icon(iconName), element("span", "", label));
+    control.addEventListener("click", () => {
+      if (control.disabled) return;
+      closePreviewMenu();
+      if (frameKey === state.frameKey) return runSafely(callback);
+    });
+    container.append(control);
+    return control;
+  };
+  const submenu = (label, iconName) => {
+    const group = element("div", "preview-menu-group");
+    group.hidden = true;
+    group.setAttribute("role", "group");
+    group.setAttribute("aria-label", label);
+    const control = element("button", "preview-menu-item");
+    control.type = "button";
+    control.setAttribute("role", "menuitem");
+    control.setAttribute("aria-expanded", "false");
+    control.append(icon(iconName), element("span", "", label), icon("chevron-down"));
+    control.addEventListener("click", () => {
+      group.hidden = !group.hidden;
+      control.setAttribute("aria-expanded", String(!group.hidden));
+      position();
+    });
+    menu.append(control, group);
+    return group;
+  };
+  const componentActions = (container, entries) => {
+    const allMovable = entries.every(item => item.movable);
+    const allHidden = entries.every(item => item.hidden);
+    button(container, allMovable ? "关闭自由移动（临时）" : "开启自由移动（临时）", "move", () => action("move", entries, !allMovable), !active);
+    button(container, "还原组件位置", "undo-2", () => action("reset", entries), !active || !entries.some(item => item.moved));
+    button(container, allHidden ? "恢复组件显示" : "临时隐藏组件", allHidden ? "eye" : "eye-off", () => action("hide", entries, !allHidden), !active);
+    button(container, "加入对话", "corner-left-up", () => {
+      if (state.conversationHidden) setConversationHidden(false);
+      addPendingContexts(state.selections.filter(item => entries.some(entry => entry.selection_id === item.selection_id)));
+    }, !active);
+  };
+
+  if (selected) {
+    const component = components.find(item => item.selection_id === selected.selection_id);
+    if (component) componentActions(menu, [component]);
+    else button(menu, "加入对话", "corner-left-up", () => {
+      if (state.conversationHidden) setConversationHidden(false);
+      addPendingContexts([selected]);
+    }, !active);
+    button(menu, "复制定位信息", "copy", async () => {
+      await navigator.clipboard.writeText(JSON.stringify({ component: selected.component, selector: selected.selector, rect: selected.rect, ...(selected.point ? { point: selected.point } : {}) }, null, 2));
+      showToast("定位信息已复制");
+    }, !active);
+    button(menu, "取消此标记", "x", () => action("remove", [selected]), !active);
+  } else if (context.can_mark) {
+    button(menu, "标记此组件", "scan-search", () => action("mark"), !active);
+  }
+  if (components.length > 1) componentActions(submenu(`全部已标记组件（${components.length}）`, "scan-search"), components);
+  menu.append(element("div", "preview-menu-separator"));
+  button(menu, "刷新预览", "refresh-cw", refreshInstancePreview, !active || state.instanceBusy);
+  button(menu, "在新窗口打开", "external-link", () => window.open(instance.app_url, "_blank", "noopener,noreferrer"), !active || !instance?.app_url);
+  button(menu, "复制预览地址", "link", async () => {
+    await navigator.clipboard.writeText(new URL(instance.preview_url, window.location.href).href);
+    showToast("预览地址已复制");
+  }, !active || !instance?.preview_url);
+  const modes = submenu("切换模式", "mouse-pointer-2");
+  [["preview", "预览", "mouse-pointer-2"], ["component", "组件选择", "scan-search"], ["point", "定点评价", "crosshair"]].forEach(([mode, label, iconName]) => {
+    button(modes, `${state.inspectMode === mode ? "✓ " : ""}${label}`, iconName, () => setInspectMode(mode), !active);
+  });
+  menu.append(element("div", "preview-menu-separator"));
+  button(menu, "还原全部临时修改", "rotate-ccw", () => action("restore-all"), !active || context.modified === false);
+  button(menu, "清除全部标记", "eraser", clearSelection, !active || !state.selections.length);
+  menu.append(element("div", "preview-menu-note", "移动和隐藏仅在当前预览生效，刷新后失效"));
+  menu.addEventListener("contextmenu", event => event.preventDefault());
+  menu.addEventListener("keydown", (event) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const controls = [...menu.querySelectorAll("button:not(:disabled)")].filter(item => item.getClientRects().length);
+    if (!controls.length) return;
+    const index = controls.indexOf(document.activeElement);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? controls.length - 1 :
+      index < 0 ? (event.key === "ArrowUp" ? controls.length - 1 : 0) :
+      (index + (event.key === "ArrowUp" ? -1 : 1) + controls.length) % controls.length;
+    controls[next].focus();
+  });
+  document.body.append(menu);
+  refreshIcons();
+  position();
+  menu.focus({ preventScroll: true });
+}
+
+function bindPreviewMenu() {
+  $("#instance-canvas").addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    showPreviewMenu(event.clientX, event.clientY);
+  });
+  window.addEventListener("pointerdown", (event) => {
+    if (previewContextMenu && !previewContextMenu.contains(event.target)) closePreviewMenu();
+  }, true);
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !previewContextMenu) return;
+    event.preventDefault();
+    closePreviewMenu();
+    instanceFrame.focus({ preventScroll: true });
+  });
+  window.addEventListener("scroll", (event) => {
+    if (previewContextMenu && !previewContextMenu.contains(event.target)) closePreviewMenu();
+  }, true);
+  ["resize", "blur", "hashchange"].forEach(type => window.addEventListener(type, closePreviewMenu));
 }
 
 function renderSelections() {
@@ -1494,6 +1668,7 @@ function renderSelections() {
 }
 
 function clearSelection() {
+  closePreviewMenu();
   state.selections = [];
   renderSelections();
   instanceFrame.contentWindow?.postMessage(
@@ -2176,9 +2351,7 @@ function bindEvents() {
   });
   $("#inject-selection").addEventListener("click", injectSelectionIntoPrompt);
   $("#clear-selection").addEventListener("click", clearSelection);
-  $("#instance-refresh").addEventListener("click", () => {
-    if (instanceFrame.src) instanceFrame.contentWindow.location.reload();
-  });
+  $("#instance-refresh").addEventListener("click", refreshInstancePreview);
   $("#instance-restart").addEventListener("click", () => runSafely(() => instanceAction("restart")));
   $("#instance-start").addEventListener("click", () => runSafely(() => instanceAction("start")));
   $("#instance-stop").addEventListener("click", () => runSafely(() => instanceAction("stop")));
@@ -2203,6 +2376,7 @@ function bindEvents() {
   });
   $("#background-remove").addEventListener("click", () => runSafely(removeBackgroundImage));
   window.addEventListener("message", receivePreviewMessage);
+  bindPreviewMenu();
   window.addEventListener("hashchange", () => {
     const target = window.location.hash.slice(1);
     if (["settings", "settings/llm", "settings/style"].includes(target)) {

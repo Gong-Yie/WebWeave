@@ -56,6 +56,7 @@ class Element {
   contains(node) { return node === this || this.children.some((child) => child instanceof Element && child.contains(node)); }
   remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((child) => child !== this); }
   setAttribute(name, value) { this.attributes.set(name, value); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
   removeAttribute(name) { this.attributes.delete(name); }
   addEventListener(name, listener) {
     if (!this.listeners.has(name)) this.listeners.set(name, []);
@@ -64,7 +65,7 @@ class Element {
   removeEventListener(name, listener) {
     this.listeners.set(name, (this.listeners.get(name) || []).filter((item) => item !== listener));
   }
-  getBoundingClientRect() { return this.bounds || { left: 0, right: 1000, width: 1000 }; }
+  getBoundingClientRect() { return this.bounds || { left: 0, top: 0, right: 1000, width: 1000, height: 400 }; }
   setPointerCapture(id) { this.pointerId = id; }
   hasPointerCapture(id) { return this.pointerId === id; }
   releasePointerCapture() { this.pointerId = null; }
@@ -81,11 +82,15 @@ function workspaceSandbox(fetch = async () => { throw new Error("Unexpected requ
   const nav = node("workspace-nav");
   nav.dataset.view = "workspace";
   const stored = new Map();
+  const windowListeners = new Map();
   const sandbox = vm.createContext({
     window: {
-      innerWidth: 1200, location: { hash: "" },
+      innerWidth: 1200, innerHeight: 800, location: { hash: "" },
       matchMedia() { return { matches: false, addEventListener() {} }; },
-      addEventListener() {}, confirm() { return true; },
+      addEventListener(type, callback) {
+        if (!windowListeners.has(type)) windowListeners.set(type, []);
+        windowListeners.get(type).push(callback);
+      }, confirm() { return true; },
       clearTimeout() {}, setTimeout() {},
       crypto: { randomUUID() { return (++modelSerial).toString(16).padStart(32, "0"); } },
     },
@@ -103,10 +108,10 @@ function workspaceSandbox(fetch = async () => { throw new Error("Unexpected requ
       createElement(tag) { return new Element(tag); },
       createTextNode(text) { return { textContent: text }; },
     },
-    console, fetch,
+    console, fetch, URL,
   });
   vm.runInContext(source, sandbox, { filename: "app.js" });
-  return { sandbox, node, nav, stored };
+  return { sandbox, node, nav, stored, windowListeners };
 }
 
 test("workspace panels hide independently and retain recovery controls", () => {
@@ -294,6 +299,142 @@ test("preview selection sends structured context and renders history as cards", 
   assert.equal(cards[0].querySelector(".context-card-copy").children[0].textContent.includes("#navigation"), false);
   assert.equal(cards[1].querySelector(".context-card-copy").children[1].textContent, "位置 (15, 30)");
   assert.equal(node("#context-card-list").children.length, 0);
+});
+
+test("preview context menu targets components, filters batch actions and clamps to the viewport", async () => {
+  const { sandbox, node } = workspaceSandbox();
+  const messages = [];
+  const copied = [];
+  const frame = { postMessage(message) { messages.push(message); } };
+  node("#instance-frame").contentWindow = frame;
+  sandbox.navigator = { clipboard: { async writeText(value) { copied.push(value); } } };
+  sandbox.window.location.origin = "http://127.0.0.1:8765";
+  sandbox.window.location.href = "http://127.0.0.1:8765/#workspace";
+  vm.runInContext(`
+    state.activeRunId = "menu-run";
+    state.activeRun = { instances: [{ instance_id: "first", status: "running", app_url: "http://127.0.0.1:9000", preview_url: "/preview/menu-run/" }] };
+    state.selectedInstanceId = "first";
+    state.selections = [
+      { selection_id: "one", ordinal: 1, type: "component", component: "标题", selector: "#hero", rect: { x: 20, y: 30 }, run_id: "menu-run" },
+      { selection_id: "two", ordinal: 2, type: "component", run_id: "menu-run" },
+      { selection_id: "point", ordinal: 3, type: "point", run_id: "menu-run" }
+    ];
+  `, sandbox);
+  const open = (selection = "one") => {
+    sandbox.menuEvent = { source: frame, origin: sandbox.window.location.origin, data: {
+      type: "webweave:context-menu", x: 1199, y: 799, selection_id: selection, modified: true,
+      components: ["one", "two", "point", "unknown"].map(selection_id => ({ selection_id })),
+    } };
+    vm.runInContext("receivePreviewMessage(menuEvent)", sandbox);
+    return vm.runInContext("previewContextMenu", sandbox);
+  };
+  const item = (menu, label) => menu.querySelectorAll(".preview-menu-item").find(control => control.children[1].textContent === label);
+  let menu = open();
+  assert.equal(menu.style.left, "192px");
+  assert.equal(menu.style.top, "392px");
+  assert.match(menu.children[0].textContent, /组件 1.*标题/);
+  const batch = item(menu, "全部已标记组件（2）");
+  batch.listeners.get("click")[0]();
+  const group = menu.children[menu.children.indexOf(batch) + 1];
+  assert.equal(group.hidden, false);
+  await item(group, "开启自由移动（临时）").listeners.get("click")[0]();
+  assert.equal(messages.at(-1).action, "move");
+  assert.deepEqual(Array.from(messages.at(-1).selection_ids), ["one", "two"]);
+  assert.equal(messages.at(-1).enabled, true);
+  menu = open();
+  await item(menu, "加入对话").listeners.get("click")[0]();
+  assert.equal(vm.runInContext("state.pendingContexts.length", sandbox), 1);
+  menu = open();
+  await item(menu, "复制定位信息").listeners.get("click")[0]();
+  assert.equal(JSON.parse(copied[0]).selector, "#hero");
+  menu = open("point");
+  assert.equal(menu.children.some(child => child.children?.[1]?.textContent === "开启自由移动（临时）"), false);
+  await item(menu, "复制预览地址").listeners.get("click")[0]();
+  assert.equal(copied.at(-1), "http://127.0.0.1:8765/preview/menu-run/");
+});
+
+test("preview menu dismisses on outside clicks and reload, rejects foreign messages and disables offline actions", () => {
+  const { sandbox, node, windowListeners } = workspaceSandbox();
+  sandbox.window.location.origin = "http://127.0.0.1:8765";
+  const frame = { postMessage() {} };
+  node("#instance-frame").contentWindow = frame;
+  vm.runInContext("bindPreviewMenu(); showPreviewMenu(20, 30)", sandbox);
+  let menu = vm.runInContext("previewContextMenu", sandbox);
+  assert.equal(menu.querySelectorAll(".preview-menu-item").filter(item => item.children[1].textContent !== "切换模式").every(item => item.disabled), true);
+  windowListeners.get("pointerdown")[0]({ target: menu });
+  assert.equal(vm.runInContext("previewContextMenu !== null", sandbox), true);
+  windowListeners.get("pointerdown")[0]({ target: node("body") });
+  assert.equal(vm.runInContext("previewContextMenu", sandbox), null);
+  for (const [origin, source] of [["https://foreign.invalid", frame], [sandbox.window.location.origin, {}]]) {
+    sandbox.menuEvent = { origin, source, data: { type: "webweave:context-menu", x: 20, y: 30 } };
+    vm.runInContext("receivePreviewMessage(menuEvent)", sandbox);
+    assert.equal(vm.runInContext("previewContextMenu", sandbox), null);
+  }
+  vm.runInContext("showPreviewMenu(20, 30)", sandbox);
+  let prevented = false;
+  windowListeners.get("keydown")[0]({ key: "Escape", preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(vm.runInContext("previewContextMenu", sandbox), null);
+  sandbox.menuEvent = { origin: sandbox.window.location.origin, source: frame, data: { type: "webweave:preview-ready" } };
+  vm.runInContext("showPreviewMenu(20, 30); receivePreviewMessage(menuEvent)", sandbox);
+  assert.equal(vm.runInContext("previewContextMenu", sandbox), null);
+});
+
+test("preview updates selected and pending coordinates after moving and synchronizes removed markers", () => {
+  const { sandbox, node } = workspaceSandbox();
+  const frame = { postMessage() {} };
+  node("#instance-frame").contentWindow = frame;
+  sandbox.window.location.origin = "http://127.0.0.1:8765";
+  vm.runInContext('state.activeRunId = "moved-run"; state.pendingContexts = [{ selection_id: "one" }];', sandbox);
+  sandbox.menuEvent = { source: frame, origin: sandbox.window.location.origin, data: {
+    type: "webweave:selection", mode: "component", selection: { selection_id: "one", rect: { x: 80, y: 50 } },
+  } };
+  vm.runInContext("receivePreviewMessage(menuEvent)", sandbox);
+  assert.equal(vm.runInContext("state.pendingContexts[0].rect.x", sandbox), 80);
+  assert.equal(vm.runInContext("state.selections[0].rect.y", sandbox), 50);
+  sandbox.menuEvent.data = { type: "webweave:selection-removed", selection_id: "one" };
+  vm.runInContext("receivePreviewMessage(menuEvent)", sandbox);
+  assert.equal(vm.runInContext("state.selections.length", sandbox), 0);
+  assert.equal(vm.runInContext("state.pendingContexts.length", sandbox), 1);
+});
+
+test("preview menu keyboard starts at the right edge and wraps through visible enabled actions", () => {
+  const { sandbox } = workspaceSandbox();
+  vm.runInContext("showPreviewMenu(20, 30)", sandbox);
+  const menu = vm.runInContext("previewContextMenu", sandbox);
+  const controls = [0, 1, 2].map(index => ({
+    index, getClientRects() { return [1]; }, focus() { sandbox.document.activeElement = this; },
+  }));
+  const hidden = { getClientRects() { return []; }, focus() { throw new Error("Hidden action received focus"); } };
+  menu.querySelectorAll = () => [...controls, hidden];
+  const key = key => menu.listeners.get("keydown")[0]({ key, preventDefault() {} });
+  key("ArrowUp");
+  assert.equal(sandbox.document.activeElement.index, 2);
+  key("ArrowDown");
+  assert.equal(sandbox.document.activeElement.index, 0);
+  key("End");
+  assert.equal(sandbox.document.activeElement.index, 2);
+  key("Home");
+  assert.equal(sandbox.document.activeElement.index, 0);
+  sandbox.document.activeElement = menu;
+  key("ArrowDown");
+  assert.equal(sandbox.document.activeElement.index, 0);
+});
+
+test("preview canvas blank area can restore temporary changes without a component target", async () => {
+  const { sandbox, node } = workspaceSandbox();
+  const messages = [];
+  node("#instance-frame").contentWindow = { postMessage(message) { messages.push(message); } };
+  vm.runInContext(`
+    state.activeRun = { instances: [{ instance_id: "first", status: "running" }] };
+    state.selectedInstanceId = "first";
+    showPreviewMenu(20, 30);
+  `, sandbox);
+  const menu = vm.runInContext("previewContextMenu", sandbox);
+  const restore = menu.querySelectorAll(".preview-menu-item").find(item => item.children[1].textContent === "还原全部临时修改");
+  assert.equal(restore.disabled, false);
+  await restore.listeners.get("click")[0]();
+  assert.equal(messages.at(-1).action, "restore-all");
 });
 
 test("instance deletion confirms the selected target and switches to the remaining instance", async () => {
