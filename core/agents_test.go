@@ -196,6 +196,11 @@ func TestMultiAgentDelegation(t *testing.T) {
 			if target == "template" {
 				installTemplateSkill(t, app)
 			}
+			if target == "audit" {
+				if err := workspace.WriteAtomic(filepath.Join(app.runRoot("result", run.store.id), "delegated.txt"), []byte("共享成果"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var request struct {
@@ -222,7 +227,11 @@ func TestMultiAgentDelegation(t *testing.T) {
 					if err := readJSONFile(filepath.Join(run.store.dir, "context.json"), &saved); err != nil || len(saved.InputItems) != 2 {
 						t.Error("delegation overwrote parent context")
 					}
-					serveModelResponse(w, true, []inputItem{{"type": "function_call", "id": "fc_file", "call_id": "call_file", "name": "create_file", "arguments": `{"file_path":"delegated.txt","content":"共享成果","timeout":5}`}})
+					tool, arguments := "create_file", `{"file_path":"delegated.txt","content":"共享成果","timeout":5}`
+					if target == "audit" {
+						tool, arguments = "file_read", `{"file_path":"delegated.txt","timeout":5}`
+					}
+					serveModelResponse(w, true, []inputItem{{"type": "function_call", "id": "fc_file", "call_id": "call_file", "name": tool, "arguments": arguments}})
 				case 3:
 					serveModelResponse(w, true, []inputItem{messageOutput("委派结果")})
 				case 4:
@@ -298,6 +307,7 @@ func TestMultiAgentDelegationErrors(t *testing.T) {
 		{"empty task", "main", `{"agent_id":"design","task":" "}`},
 		{"invalid JSON", "main", `[]`},
 		{"invalid timeout", "main", `{"agent_id":"design","task":"设计","timeout":-1}`},
+		{"incomplete contract", "main", `{"agent_id":"design","task":"设计","contract":{}}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			app := testApp(t)
@@ -350,6 +360,10 @@ func TestMultiAgentDelegationErrors(t *testing.T) {
 			case text := <-result:
 				if !strings.Contains(text, `"ok":false`) || !strings.Contains(text, "执行失败") {
 					t.Fatal("cancellation did not return a failure")
+				}
+				var result agentCallResult
+				if err := json.Unmarshal([]byte(text), &result); err != nil || result.Result.Status != "failed" || result.ExecutionReason != map[bool]string{false: "timeout", true: "cancelled"}[cancelParent] {
+					t.Fatalf("execution reason was not preserved: %+v %v", result, err)
 				}
 				_, events, err := run.store.snapshot()
 				if err != nil || len(events) == 0 || events[len(events)-1].Type != "subagent_finished" || events[len(events)-1].Payload["status"] != "stopped" {

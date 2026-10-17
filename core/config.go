@@ -118,6 +118,7 @@ func parseConfig(data []byte) (RuntimeConfig, error) {
 	if _, err := findAgent(cfg.Agents, "template"); err != nil {
 		cfg.Agents = append(cfg.Agents, defaultAgents()[4])
 	}
+	upgradeAgentRoles(cfg.Agents)
 	if err := validateAgents(cfg.Agents); err != nil {
 		return cfg, err
 	}

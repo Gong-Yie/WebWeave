@@ -330,6 +330,8 @@ function statusLabel(status) {
     stopping: "正在停止",
     stopped: "已停止",
     completed: "已完成",
+    partial: "部分完成",
+    blocked: "待决策或补充信息",
     failed: "执行失败",
   }[status] || status || "等待输入";
 }
@@ -633,9 +635,11 @@ function collectSubagents(run) {
     if (event.type === "model_reasoning_delta") task.activity = "正在思考";
     if (event.type === "model_output_delta") task.activity = "正在生成";
     if (event.type === "subagent_finished") {
-      task.status = payload.status;
+      task.executionStatus = payload.status;
+      task.status = payload.status === "completed" ? payload.result?.status || payload.status : payload.status;
+      task.result = payload.result;
       task.reason = payload.reason;
-      task.activity = payload.reason || (payload.status === "completed" ? "结果已返回主 Agent" : statusLabel(payload.status));
+      task.activity = payload.reason || payload.result?.summary || (payload.status === "completed" ? "结果已返回主 Agent" : statusLabel(task.status));
     }
   }
   for (const task of tasks.values()) {
@@ -645,6 +649,17 @@ function collectSubagents(run) {
     }
   }
   return [...tasks.values()];
+}
+
+function agentResultText(result) {
+  const lines = [`${statusLabel(result.status)}：${result.summary}`];
+  for (const [key, label] of [["artifacts", "交付文件"], ["verification", "验证情况"], ["pending", "剩余事项"], ["questions", "需要确认"]]) {
+    if (result[key]?.length) lines.push(`\n${label}`, ...result[key].map((item) => `• ${item}`));
+  }
+  if (result.previews?.length) {
+    lines.push("\n预览方案", ...result.previews.map((preview) => `• ${preview.name}：${preview.purpose}；${preview.data_source}（实例 ${preview.instance_id}）`));
+  }
+  return lines.join("\n");
 }
 
 function openSubagent(taskId) {
@@ -887,6 +902,7 @@ function renderConversation(run, task = null) {
       return;
     }
     if (event.type === "model_output_delta") {
+      if (event.payload?.result_format === "agent_result") return;
       flushTools();
       const agentName = event.payload?.agent_name || "WebWeave";
       if (agentName !== streamedAgent) flushStreamedText();
@@ -905,7 +921,9 @@ function renderConversation(run, task = null) {
       if (reasoning) showReasoning(reasoning, event.payload || {}, index);
       reasoningBlock = null;
       reasoningParts.clear();
-      const text = event.payload?.output_text;
+      const text = event.payload?.result_format === "agent_result"
+        ? (task?.result && event.payload?.output_text?.trim() ? agentResultText(task.result) : "")
+        : event.payload?.output_text;
       flushTools();
       if (typeof text === "string" && text.trim()) {
         streamedText = text;

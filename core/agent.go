@@ -67,6 +67,7 @@ func newClient(provider ProviderConfig) (openai.Client, error) {
 func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, agent AgentConfig, delegated bool) (string, error) {
 	execution, _ := ctx.Value(agentExecutionKey{}).(agentExecution)
 	execution.agent, execution.delegated = agent, delegated
+	execution.readOnly = execution.readOnly || agent.ID == "audit"
 	ctx = context.WithValue(ctx, agentExecutionKey{}, execution)
 	templateSkill := ""
 	if agent.ID == "template" {
@@ -116,6 +117,14 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 			return "", err
 		}
 		params := responses.ResponseNewParams{Model: provider.Model, Instructions: openai.String(agentInstructions(agent, cfg, store.id) + templateSkill), Tools: agentTools(agent, cfg)}
+		if execution.readOnly {
+			params.Tools = readOnlyAgentTools(params.Tools)
+			params.Instructions = openai.String(params.Instructions.Value + "\n本次任务只读：不得修改项目文件、下载文件、执行终端命令或改变实例状态。需要修改或运行检查时返回具体要求交主 Agent 安排。")
+		}
+		if delegated {
+			params.Text.Format.OfJSONSchema = agentResultFormat()
+			params.Instructions = openai.String(params.Instructions.Value + "\n\n" + delegatedResultInstructions)
+		}
 		if len(provider.ReasoningEfforts) == 0 {
 			params.Temperature = openai.Float(0.7)
 		}
@@ -126,6 +135,9 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 			params.Reasoning.Summary = shared.ReasoningSummaryAuto
 		}
 		if round == limit {
+			if execution.outcome != nil {
+				execution.outcome.budgetReached = true
+			}
 			params.Tools = nil
 			params.ToolChoice.OfToolChoiceMode = openai.Opt(responses.ToolChoiceOptionsNone)
 			params.Instructions = openai.String(params.Instructions.Value + "\n本次执行已达到工具轮次预算。本轮必须收尾：说明实际完成的文件、验证结果、预览入口和未完成事项，不再调用工具，不得把未完成任务说成已完成。")

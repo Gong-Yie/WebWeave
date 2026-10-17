@@ -3136,7 +3136,9 @@ body.is-resizing iframe {
   color: #a23b32;
 }
 
-.success-badge[data-status="stopped"] {
+.success-badge[data-status="stopped"],
+.success-badge[data-status="partial"],
+.success-badge[data-status="blocked"] {
   background: #eeeae3;
   color: #6f6252;
 }

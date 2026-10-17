@@ -555,6 +555,35 @@ test("subagent tasks retain separate identities and recover interrupted status",
   assert.equal(recovered[1].status, "stopped");
 });
 
+test("subagent business results remain distinct from execution status and render readable handoffs", () => {
+  for (const [execution, business, expected] of [["completed", "partial", "partial"], ["completed", "blocked", "blocked"], ["completed", "failed", "failed"], ["stopped", "failed", "stopped"]]) {
+    const { sandbox, node } = workspaceSandbox();
+    const result = {
+      status: business, summary: "已制作样例，等待选择", artifacts: ["sample/index.html"], verification: ["未验证：尚未连接后端"],
+      pending: ["连接接口"], questions: ["请选择视觉方向"], previews: [{ name: "方案一", instance_id: "preview-1", purpose: "视觉示意", data_source: "演示数据" }],
+    };
+    sandbox.run = { run_id: "protocol", job_active: false, events: [
+      { type: "subagent_started", payload: { subagent_id: "child", agent_name: "前端设计Agent", task: "制作样例" } },
+      { type: "model_output_delta", payload: { subagent_id: "child", delegated: true, result_format: "agent_result", delta: '{"status":' } },
+      { type: "model_output", payload: { subagent_id: "child", delegated: true, result_format: "agent_result", output_text: JSON.stringify(result), items: [] } },
+      { type: "subagent_finished", payload: { subagent_id: "child", status: execution, result } },
+    ] };
+    const task = vm.runInContext("collectSubagents(run)[0]", sandbox);
+    assert.equal(task.status, expected);
+    assert.equal(task.executionStatus, execution);
+    sandbox.task = task;
+    vm.runInContext("renderConversation(run, task)", sandbox);
+    const messages = node("#subagent-conversation").children.filter((child) => child.className === "message message-agent");
+    assert.equal(messages.length, 1);
+    const body = messages[0].querySelector(".message-body").children.map((paragraph) => paragraph.textContent).join("\n");
+    assert.match(body, /sample\/index.html/);
+    assert.match(body, /未验证/);
+    assert.match(body, /请选择视觉方向/);
+    assert.match(body, /方案一.*视觉示意.*演示数据/);
+    assert.doesNotMatch(body, /"status"/);
+  }
+});
+
 test("reasoning renders once for streaming and nonstreaming responses", () => {
   for (const streaming of [false, true]) {
     const { sandbox, node } = workspaceSandbox();

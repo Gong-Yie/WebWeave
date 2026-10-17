@@ -24,6 +24,37 @@ type AgentConfig struct {
 }
 
 func defaultAgents() []AgentConfig {
+	agents := legacyDefaultAgents()
+	agents[0].Description = "引导需求、维护项目共识、协调阶段任务并完成交付。"
+	agents[0].Prompt = "你是主 Agent，是用户沟通和决策汇总入口。面向弱代码用户，用通俗问题和实例预览逐步确定需求，维护用户原话、已确认决定、推断和待确认事项。按任务复杂度委派设计、前端工程和质量检查；核对交付后继续推进，常规实现自主完成，关键节点等待用户确认。"
+	agents[1].Name = "前端设计Agent"
+	agents[1].Description = "设计整页或局部视觉与交互，按需制作可预览候选样例。"
+	agents[1].Prompt = "你是前端设计 Agent，负责页面结构、视觉方向、排版、配色与交互方案，也负责复杂前端美化和局部组件设计。先理解已有项目和约束，用户需要比较方向时制作代表性页面或局部预览，不完整开发每个候选方案。交接方案、文件路径、instance_id，并说明哪些代码可复用、哪些只是示意，正式实现交由前端工程 Agent。"
+	agents[2].Name = "前端工程Agent"
+	agents[2].Description = "理解现有项目，生成或优化前端、微调样式、对接接口并准备交付。"
+	agents[2].Prompt = "你是前端工程 Agent，负责从零制作网页、优化复杂前端、局部样式调整、为已有后端生成前端和对接接口。先读取源码与接口资料，沿用现有技术栈，在已确认范围内以最小改动实现。复用选定方案和已有实例，按风险验证，交付实际文件、预览和运行或部署配置；接口未知时明确说明，不伪装已完成真实对接。"
+	agents[3].Name = "质量检查Agent"
+	agents[3].Description = "只读检查需求符合度、关键功能、接口及安全边界，报告证据与结论。"
+	agents[3].Prompt = "你是质量检查 Agent，保持只读。根据委派验收条件检查关键交互、接口对接、运行问题和安全边界，报告有证据的问题、影响程度、文件位置及修复建议，修复交由前端工程 Agent。区分源码检查和真实运行验证，不把静态阅读说成测试通过；复用仍适用于当前文件的检查结论，不反复检查轻微风格问题。"
+	return agents
+}
+
+// Exact legacy defaults may be upgraded; user-edited roles and model choices stay intact.
+func upgradeAgentRoles(agents []AgentConfig) {
+	legacy, current := legacyDefaultAgents(), defaultAgents()
+	for i := range agents {
+		for j, old := range legacy {
+			if agents[i].ID == old.ID && agents[i].Name == old.Name && agents[i].Description == old.Description && agents[i].Prompt == old.Prompt {
+				modelID := agents[i].ModelID
+				agents[i] = current[j]
+				agents[i].ModelID = modelID
+				break
+			}
+		}
+	}
+}
+
+func legacyDefaultAgents() []AgentConfig {
 	return []AgentConfig{
 		{"main", "主Agent", "统筹任务，调用其他 Agent 并整合结果。", "你是主 Agent，负责理解完整需求、规划任务、协调所有专业 Agent 并交付最终结果。按需使用 call_agent 委派设计、编程、审计或自定义任务，明确目标、文件路径和验收要求，读取委派结果后继续推进。", ""},
 		{"design", "网站灵感设计Agent", "探索网站灵感、视觉风格与交互设计。", "你是网站灵感设计 Agent，负责网站参考资料、视觉方向、页面结构、排版、配色与交互设计。先读取相关资源，按需搜索灵感，产出具体且可实施的设计方案。被委派时只完成委派范围，并给出方案、依据和交付文件路径。", ""},
@@ -160,6 +191,8 @@ type agentExecution struct {
 	taskID    string
 	parentID  string
 	effort    string
+	readOnly  bool
+	outcome   *agentOutcome
 }
 
 type agentExecutionKey struct{}
@@ -169,6 +202,9 @@ func appendAgentEvent(ctx context.Context, store *runStore, kind string, payload
 		payload["agent_id"] = execution.agent.ID
 		payload["agent_name"] = execution.agent.Name
 		payload["delegated"] = execution.delegated
+		if execution.delegated {
+			payload["result_format"] = "agent_result"
+		}
 		if execution.taskID != "" {
 			payload["subagent_id"] = execution.taskID
 			payload["parent_agent_id"] = execution.parentID
@@ -187,8 +223,9 @@ func saveAgentContext(ctx context.Context, store *runStore, items []inputItem, s
 func agentInstructions(agent AgentConfig, cfg RuntimeConfig, id string) string {
 	instructions := strings.NewReplacer("{run_id}", id, "{timeout_default}", fmt.Sprintf("%g", cfg.ToolTimeout.DefaultSeconds), "{timeout_max}", fmt.Sprintf("%g", cfg.ToolTimeout.MaxSeconds)).Replace(systemPrompt)
 	instructions += "\n\n当前 Agent：" + agent.Name + "（ID：" + agent.ID + "）\n角色指令：\n" + agent.Prompt
+	instructions += "\n\n" + collaborationInstructions
 	if agent.ID == "main" {
-		instructions += "\n协作要求：设计委派只要求必要的视觉方向和页面结构，不要求长篇规范或坐标级 SVG 蓝图。优先一次编程委派完成可用首版并启动预览；审计只做一次必要检查，只有确认影响使用的缺陷时才追加修复，不为轻微问题反复审计。\n"
+		instructions += "\n委派按顺序进行，明确每项任务的写入范围。模板制作是独立入口，不加入普通网页任务的默认流程。简单微调可直接交前端工程，视觉方案确认后再正式实现；上线前准备具体发布方案供用户确认。\n"
 		instructions += "\n可通过 call_agent 调用以下 Agent。它们共享当前运行文件目录，但有独立的任务上下文；务必提供完整任务、必要背景和文件路径。\n"
 		for _, target := range cfg.Agents {
 			if target.ID != "main" {
@@ -200,7 +237,7 @@ func agentInstructions(agent AgentConfig, cfg RuntimeConfig, id string) string {
 		instructions += "\n交付要求：除非用户明确要求完整设计文档，否则把方案控制在约 800 字，提供可直接实现的布局、色板和交互要点，不生成上千行规范。不为常规配色、字体栈和缓动曲线搜索网页；外部搜索失败后继续完成方案。\n"
 	}
 	if agent.ID == "audit" {
-		instructions += "\n审计要求：只检查核心功能、明显运行错误和安全边界；一次检查通过后不重复验证，不安装新测试框架进行额外检查。输出精简的有证据问题清单与结论，不撰写长篇检查过程。\n"
+		instructions += "\n质量检查保持只读，不能写入文件、执行任意终端命令、下载文件或改变实例。需要运行命令时向主 Agent 提供具体检查要求，由前端工程执行并回传证据；未取得证据时标注未验证。只报告有证据且影响交付的问题，一次检查通过后不重复验证。\n"
 	}
 	return instructions
 }
@@ -228,13 +265,17 @@ func agentTools(agent AgentConfig, cfg RuntimeConfig) []responses.ToolUnionParam
 			}
 		}
 		definitions = append(definitions, responses.ToolUnionParam{OfFunction: &responses.FunctionToolParam{
-			Name: "call_agent", Description: openai.String("委派任务给专业或自定义 Agent，返回执行结果；共享当前运行目录"), Strict: openai.Bool(false),
+			Name: "call_agent", Description: openai.String("按协作协议委派当前阶段任务；填写任务契约，返回业务结果与独立执行状态；共享当前运行目录"), Strict: openai.Bool(false),
 			Parameters: map[string]any{"type": "object", "properties": map[string]any{
 				"agent_id": map[string]any{"type": "string", "enum": ids},
-				"task":     map[string]any{"type": "string", "description": "完整任务、背景、相关文件路径和预期结果"},
+				"task":     map[string]any{"type": "string", "description": "本次委派的明确目标"},
+				"contract": agentContractSchema(),
 				"timeout":  map[string]any{"type": "number", "minimum": 0.1},
-			}, "required": []string{"agent_id", "task", "timeout"}, "additionalProperties": false},
+			}, "required": []string{"agent_id", "task", "contract", "timeout"}, "additionalProperties": false},
 		}})
+	}
+	if agent.ID == "audit" {
+		return readOnlyAgentTools(definitions)
 	}
 	return definitions
 }
@@ -248,15 +289,21 @@ func (a *App) callAgent(ctx context.Context, store *runStore, caller AgentConfig
 		return fail(errors.New("只有主 Agent 可以调用其他 Agent"))
 	}
 	var args struct {
-		AgentID string   `json:"agent_id"`
-		Task    string   `json:"task"`
-		Timeout *float64 `json:"timeout"`
+		AgentID  string             `json:"agent_id"`
+		Task     string             `json:"task"`
+		Contract *agentTaskContract `json:"contract"`
+		Timeout  *float64           `json:"timeout"`
 	}
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
 		return fail(fmt.Errorf("委派参数无效: %w", err))
 	}
 	if args.AgentID == "" || args.AgentID == "main" || strings.TrimSpace(args.Task) == "" {
 		return fail(errors.New("必须选择其他 Agent 并填写非空任务"))
+	}
+	if args.Contract != nil {
+		if err := args.Contract.validate(); err != nil {
+			return fail(err)
+		}
 	}
 	cfg := a.config.get()
 	agent, err := findAgent(cfg.Agents, args.AgentID)
@@ -269,25 +316,25 @@ func (a *App) callAgent(ctx context.Context, store *runStore, caller AgentConfig
 	}
 	delegateCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	execution := agentExecution{agent: agent, delegated: true, taskID: workspace.NewID(), parentID: caller.ID}
+	outcome := &agentOutcome{}
+	execution := agentExecution{agent: agent, delegated: true, taskID: workspace.NewID(), parentID: caller.ID, readOnly: agent.ID == "audit" || args.Contract != nil && args.Contract.ReadOnly, outcome: outcome}
 	delegateCtx = context.WithValue(delegateCtx, agentExecutionKey{}, execution)
-	if err := appendAgentEvent(delegateCtx, store, "subagent_started", map[string]any{"task": args.Task}); err != nil {
+	if err := appendAgentEvent(delegateCtx, store, "subagent_started", map[string]any{"task": args.Task, "contract": args.Contract, "read_only": execution.readOnly}); err != nil {
 		return fail(err)
 	}
-	text, err := a.runAgent(delegateCtx, store, []inputItem{{"role": "user", "content": args.Task}}, agent, true)
-	status, reason := "completed", ""
-	if err != nil {
-		status, reason = "failed", err.Error()
-		if delegateCtx.Err() != nil {
-			status = "stopped"
-		}
+	task := args.Task
+	if args.Contract != nil {
+		data, _ := json.Marshal(struct {
+			Task     string             `json:"task"`
+			Contract *agentTaskContract `json:"contract"`
+		}{args.Task, args.Contract})
+		task = string(data)
 	}
-	if eventErr := appendAgentEvent(delegateCtx, store, "subagent_finished", map[string]any{"status": status, "reason": reason}); eventErr != nil {
+	text, runErr := a.runAgent(delegateCtx, store, []inputItem{{"role": "user", "content": task}}, agent, true)
+	result := finishAgentCall(agent, execution.taskID, text, runErr, delegateCtx.Err(), outcome.budgetReached)
+	if eventErr := appendAgentEvent(delegateCtx, store, "subagent_finished", map[string]any{"status": result.ExecutionStatus, "reason": result.Error, "execution_reason": result.ExecutionReason, "result": result.Result}); eventErr != nil {
 		return fail(eventErr)
 	}
-	if err != nil {
-		return fail(fmt.Errorf("%s 执行失败: %w", agent.Name, err))
-	}
-	data, _ := json.Marshal(map[string]any{"ok": true, "agent_id": agent.ID, "agent_name": agent.Name, "output": text})
+	data, _ := json.Marshal(result)
 	return string(data)
 }
