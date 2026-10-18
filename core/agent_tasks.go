@@ -167,6 +167,7 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 		}
 		if runErr == nil && (delegated || execution.interactive) {
 			result, parseErr := parseAgentResult(text)
+			declaredPending := append(append([]string{}, result.Pending...), result.Questions...)
 			if parseErr == nil && result.Status == "completed" {
 				pending, err := a.completionPending(store, task)
 				if err != nil {
@@ -189,7 +190,9 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 					task.Work.Completed = appendUnique(task.Work.Completed, result.Summary)
 					task.Work.Completed = task.Work.Completed[max(0, len(task.Work.Completed)-12):]
 				}
-				task.Work.Pending = appendUnique(task.Work.Pending, append(result.Pending, result.Questions...)...)
+				// Gate feedback is derived from the original work records. Persisting
+				// it as a new pending item duplicates findings under different IDs.
+				task.Work.Pending = appendUnique(task.Work.Pending, declaredPending...)
 				task.Work.Next = "向用户交付当前阶段结果"
 				if len(result.Pending) > 0 {
 					task.Work.Next = result.Pending[0]

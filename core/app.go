@@ -195,6 +195,18 @@ func (a *App) startMessage(id, content, agentID string, attachments []string, in
 	if err = run.store.start(); err != nil {
 		return err
 	}
+	if resume && len(items) > 0 && itemString(items[len(items)-1], "role") == "assistant" && len(pendingTaskCalls(items)) == 0 {
+		// Clicking Continue after a final response starts a new user turn. Some
+		// thinking providers reject replaying that final as an unfinished turn.
+		item := inputItem{"role": "user", "content": "继续当前已授权任务，保留已有文件、用户选择和未完成事项，不重复已完成操作；此操作不新增任何确认或权限。"}
+		items = append(items, item)
+		if err := run.store.append("user_message", map[string]any{"item": item, "display_text": "继续", "continuation": true, "agent_id": agent.ID, "agent_name": agent.Name}); err != nil {
+			return err
+		}
+		if err := run.store.saveContext(items, nil); err != nil {
+			return err
+		}
+	}
 	if !resume {
 		task.ReadRepeats, task.ReadsSinceNote = 0, 0
 		task.RequestRevision = contentKey(content)

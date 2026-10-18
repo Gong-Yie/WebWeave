@@ -47,6 +47,7 @@ type taskWorkState struct {
 	Completed []string       `json:"completed"`
 	Pending   []string       `json:"pending"`
 	Findings  []string       `json:"findings"`
+	Notes     []string       `json:"notes,omitempty"`
 	Checks    []taskCheck    `json:"checks"`
 	Next      string         `json:"next"`
 	Revision  string         `json:"revision,omitempty"`
@@ -61,7 +62,8 @@ func taskWorkTool() responses.ToolUnionParam {
 			"step":      map[string]any{"type": "string", "description": "本步明确目标及验收边界"},
 			"completed": stringArraySchema("已完成的工作结论，最多 12 条，不逐条记录读取日志"),
 			"pending":   stringArraySchema("尚未完成的验收项或待办，最多 12 条"),
-			"findings":  stringArraySchema("尚未解决的问题、位置和证据；不得因压缩而删除，最多 12 条"),
+			"findings":  stringArraySchema("阻碍本次验收的未解决问题、位置和证据；不得因压缩而删除，最多 12 条"),
+			"notes":     stringArraySchema("已披露的非阻塞限制、建议或用户明确接受的取舍，最多 12 条；不表示问题已修复或运行验证通过。旧问题转备注时须同时用 resolved 引用原 ID 说明依据"),
 			"checks": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
 				"name": map[string]any{"type": "string"}, "status": map[string]any{"type": "string", "enum": []string{"reviewed", "passed", "failed", "unverified"}},
 				"evidence": map[string]any{"type": "string", "description": "源码位置或工具结果，不把源码阅读写成运行验证"},
@@ -98,7 +100,7 @@ func (a *App) updateTaskWork(ctx context.Context, store *runStore, raw string) (
 	if !slices.Contains([]string{"requirements", "design", "implementation", "verification", "review", "delivery", "deployment"}, work.Phase) || strings.TrimSpace(work.Step) == "" || strings.TrimSpace(work.Next) == "" {
 		return invalid(errors.New("必须填写有效阶段、步骤和下一步"))
 	}
-	for _, values := range [][]string{work.Completed, work.Pending, work.Findings, {work.Step, work.Next}} {
+	for _, values := range [][]string{work.Completed, work.Pending, work.Findings, work.Notes, {work.Step, work.Next}} {
 		if len(values) > 12 {
 			return invalid(errors.New("每类工作记录最多 12 条"))
 		}
@@ -231,6 +233,8 @@ func mergeTaskWork(previous *taskWorkState, work *taskWorkState, resolved []task
 	if previous != nil {
 		work.Completed = appendUnique(previous.Completed, work.Completed...)
 		work.Completed = work.Completed[max(0, len(work.Completed)-12):]
+		work.Notes = appendUnique(previous.Notes, work.Notes...)
+		work.Notes = work.Notes[max(0, len(work.Notes)-12):]
 	}
 	return nil
 }
@@ -287,6 +291,7 @@ func (a *App) taskMemory(ctx context.Context, store *runStore) (string, error) {
 		return "", err
 	}
 	text := "\n[持久任务记录]\n" + string(data) + "\n以真实 user_approvals 为确认依据，contract.confirmed 和 work 是 Agent 记录。沿用 work 中的审阅结论与未解决问题；revision 不一致的验收证据仅供参考，不可宣称当前版本已通过。verification_evidence 是同一运行当前版本的成功验证，可用 segment_id 回读结果，再用 task_id/call_id 引用，无需重跑。解决待办或问题时用 update_task_state.resolved 引用 open_items 的 ID 并说明证据。验收项 name 使用 contract.acceptance 原文；静态检查用 reviewed，运行验证用 passed。完成本步验收后交回结果，不为摘要没有展开源码而重读。"
+	text += "\npending/findings 只记录阻碍本次任务验收的事项；非阻塞建议、可选补测和用户明确接受的限制放 notes，并在交付中如实披露。旧问题转为 notes 时必须同时用 resolved 引用其 open_items ID，保留未运行验证等事实；不能通过只写 notes 删除旧问题，不能以用户拒绝可选补测为由反复要求检查。仍属于当前契约的必需验收项不能因此豁免。"
 	if task.ReadsSinceNote >= 6 {
 		text += "\n已连续读取多次，下一步先用 update_task_state 保存已形成的结论、具体问题和下一步，再继续。"
 	}

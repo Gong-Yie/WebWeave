@@ -118,6 +118,125 @@ func TestTaskCompletionRejectsUnfinishedResults(t *testing.T) {
 	}
 }
 
+func TestTaskNonBlockingNotesDoNotWaiveOpenWork(t *testing.T) {
+	for _, test := range []struct {
+		name                       string
+		finding, required, blocked bool
+	}{
+		{"disclosed limitation", false, false, false},
+		{"unresolved finding remains", true, false, true},
+		{"required acceptance remains", false, true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app := testApp(t)
+			run := testRun(t, app, "non-blocking-notes")
+			task := &taskCheckpoint{ID: "notes-task", Tools: map[string]*taskTool{}, Work: &taskWorkState{}}
+			if test.finding {
+				task.Work.Findings = []string{"E_NAV：导航缺陷仍需处理"}
+			}
+			if test.required {
+				task.Contract = &agentTaskContract{Acceptance: []string{"键盘操作验收"}}
+			}
+			ctx := context.WithValue(context.Background(), agentExecutionKey{}, agentExecution{checkpoint: task})
+			output, err := app.updateTaskWork(ctx, run.store, `{"phase":"delivery","step":"交付只读审阅","completed":[],"pending":[],"findings":[],"notes":["光晕强度属于主观偏好，用户已选择保持现状"],"checks":[],"next":"如实报告结果及限制"}`)
+			if err != nil || !strings.Contains(output, `"ok":true`) {
+				t.Fatal(output, err)
+			}
+			pending, err := app.completionPending(run.store, task)
+			if err != nil || (len(pending) > 0) != test.blocked {
+				t.Fatal("notes changed completion of mandatory work", pending, err)
+			}
+			restored, err := run.store.loadTask(task.ID)
+			if err != nil || restored.Work == nil || len(restored.Work.Notes) != 1 {
+				t.Fatal("disclosed limitation was not persisted", err)
+			}
+		})
+	}
+}
+
+func TestTaskCompletionFeedbackPreservesIssueIdentity(t *testing.T) {
+	app := testApp(t)
+	run := testRun(t, app, "completion-identity")
+	finding := "可选的逐像素目检尚未进行，用户已接受保持现状"
+	task := &taskCheckpoint{ID: "identity-task", AgentID: "main", Tools: map[string]*taskTool{}, Items: []inputItem{{"role": "user", "content": "不用补测，保持现状并交付"}}, Work: &taskWorkState{Phase: "review", Step: "交付检查结论", Findings: []string{finding}, Next: "记录用户已接受的限制"}}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			serveModelResponse(w, false, []inputItem{taskMessageOutput("审阅已完成，存在已披露限制")})
+		case 2:
+			if len(task.Work.Pending) != 0 || len(task.Work.Findings) != 1 {
+				t.Error("completion gate duplicated the finding as a pending item")
+			}
+			args, _ := json.Marshal(map[string]any{"phase": "delivery", "step": "交付检查结论", "completed": []string{"已完成本次审阅"}, "pending": []string{}, "findings": []string{}, "notes": []string{finding}, "checks": []taskCheck{}, "next": "向用户报告结果及限制", "resolved": []taskResolution{{contentKey("finding\x00" + finding)[:16], "本项为用户明确拒绝的可选补测，保留为未验证限制，不代表已修复或验证通过"}}})
+			serveModelResponse(w, false, []inputItem{{"type": "function_call", "call_id": "close-note", "name": "update_task_state", "arguments": string(args)}})
+		default:
+			if calls.Load() > 3 {
+				t.Error("accepted limitation failed to converge")
+			}
+			serveModelResponse(w, false, []inputItem{taskMessageOutput("只读审阅已交付；可选目检未进行，保持现状")})
+		}
+	}))
+	t.Cleanup(server.Close)
+	useProvider(t, app, server.URL, false)
+	ctx := context.WithValue(context.Background(), agentExecutionKey{}, agentExecution{checkpoint: task, interactive: true})
+	_, err := app.runAgent(ctx, run.store, task.Items, defaultAgents()[0], false)
+	if err != nil || task.Status != "completed" || calls.Load() != 3 || len(task.Work.Notes) != 1 || len(task.Work.OpenItems) != 0 {
+		t.Fatal("disclosed limitation still blocked delivery", task.Status, calls.Load(), err)
+	}
+}
+
+func TestTaskContinueStartsNewTurnAfterFinalResponse(t *testing.T) {
+	for _, final := range []bool{true, false} {
+		t.Run(fmt.Sprintf("final=%v", final), func(t *testing.T) {
+			app := testApp(t)
+			run := testRun(t, app, "continue-final")
+			task := &taskCheckpoint{ID: "paused-final", AgentID: "main", Status: "failed", RequestRevision: "original-request", Items: []inputItem{{"role": "user", "content": "完成当前任务"}}, Tools: map[string]*taskTool{}}
+			if final {
+				task.Items = append(task.Items, messageOutput("上次交付尚未完成"))
+			} else {
+				task.Items = append(task.Items, inputItem{"type": "function_call", "call_id": "read", "name": "file_read", "arguments": "{}"}, inputItem{"type": "function_call_output", "call_id": "read", "output": "已有工具结果"})
+				task.Tools["read"] = &taskTool{Name: "file_read", Arguments: "{}", Status: "completed", Output: "已有工具结果"}
+			}
+			if err := run.store.saveTask(task); err != nil {
+				t.Fatal(err)
+			}
+			if err := run.store.selectTask(task.ID); err != nil {
+				t.Fatal(err)
+			}
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				var request struct {
+					Input []inputItem `json:"input"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					return
+				}
+				last := request.Input[len(request.Input)-1]
+				if final && (itemString(last, "role") != "user" || !strings.Contains(userText(last), "不新增任何确认或权限")) {
+					t.Error("final-response continuation did not start a user turn")
+				}
+				if !final && itemString(last, "type") != "function_call_output" {
+					t.Error("tool-result continuation gained an unnecessary turn")
+				}
+				serveModelResponse(w, false, []inputItem{taskMessageOutput("当前任务完成")})
+			}))
+			t.Cleanup(server.Close)
+			useProvider(t, app, server.URL, false)
+			if err := app.startMessage(run.store.id, "", "", nil, nil, true, nil); err != nil {
+				t.Fatal(err)
+			}
+			awaitJob(t, jobDone(t, run))
+			restored, err := run.store.loadTask(task.ID)
+			if err != nil || restored.Status != "completed" || restored.RequestRevision != "original-request" || calls.Load() != 1 {
+				t.Fatal("continuation failed or changed task scope", err, calls.Load())
+			}
+		})
+	}
+}
+
 func TestTaskWorkExplicitlyWithdrawsSupersededCheck(t *testing.T) {
 	app := testApp(t)
 	run := testRun(t, app, "superseded-check")
