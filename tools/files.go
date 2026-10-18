@@ -1,7 +1,10 @@
 package tools
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -38,8 +41,8 @@ func (e *Executor) readFile(id string, args Args) (any, error) {
 	if args.MaxChars != nil {
 		maximum = *args.MaxChars
 	}
-	if maximum < 1 || maximum > 100000 || strings.TrimSpace(args.FilePath) == "" {
-		return nil, errors.New("file_path 不能为空，max_chars 必须在 1 到 100000 之间")
+	if maximum < 1 || maximum > 100000 || args.Offset < 0 || strings.TrimSpace(args.FilePath) == "" {
+		return nil, errors.New("file_path 不能为空，offset 必须非负，max_chars 必须在 1 到 100000 之间")
 	}
 	raw := filepath.FromSlash(args.FilePath)
 	path := raw
@@ -73,14 +76,33 @@ func (e *Executor) readFile(id string, args Args) (any, error) {
 		return nil, err
 	}
 	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, int64(maximum+1)*4))
-	if err != nil {
-		return nil, err
+	hash := sha256.New()
+	reader := bufio.NewReader(io.TeeReader(file, hash))
+	for i := 0; i < args.Offset; i++ {
+		if _, _, err := reader.ReadRune(); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil, errors.New("offset 超过文件字符数")
+			}
+			return nil, err
+		}
 	}
-	runes := []rune(strings.ToValidUTF8(string(data), "�"))
+	runes := make([]rune, 0, maximum+1)
+	for len(runes) <= maximum {
+		value, _, err := reader.ReadRune()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		runes = append(runes, value)
+	}
 	truncated := len(runes) > maximum
 	if truncated {
 		runes = runes[:maximum]
 	}
-	return map[string]any{"path": path, "content": string(runes), "truncated": truncated, "max_chars": maximum}, nil
+	if _, err := io.Copy(io.Discard, reader); err != nil {
+		return nil, err
+	}
+	return map[string]any{"path": path, "content": string(runes), "truncated": truncated, "max_chars": maximum, "offset": args.Offset, "next_offset": args.Offset + len(runes), "content_sha256": hex.EncodeToString(hash.Sum(nil))}, nil
 }

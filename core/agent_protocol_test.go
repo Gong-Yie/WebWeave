@@ -136,7 +136,8 @@ func TestAgentProtocolDelegation(t *testing.T) {
 						t.Error("read-only task advertised a write tool")
 					}
 				}
-				if calls.Add(1) == 1 {
+				call := calls.Add(1)
+				if call == 1 {
 					var task struct {
 						Task     string            `json:"task"`
 						Contract agentTaskContract `json:"contract"`
@@ -145,6 +146,11 @@ func TestAgentProtocolDelegation(t *testing.T) {
 						t.Error("contract did not reach isolated child context")
 					}
 					serveModelResponse(w, false, []inputItem{{"type": "function_call", "id": "fc_write", "call_id": "write", "name": "create_file", "arguments": `{"file_path":"card.html","content":"卡片","timeout":1}`}})
+					return
+				}
+				if !readOnly && call == 2 {
+					// A file write alone does not satisfy the delegated acceptance.
+					serveModelResponse(w, false, []inputItem{{"type": "function_call", "call_id": "review", "name": "update_task_state", "arguments": `{"phase":"review","step":"检查卡片","completed":["已检查样式"],"pending":[],"findings":[],"checks":[{"name":"手机无溢出","status":"reviewed","evidence":"card.html：静态布局检查；未运行浏览器","call_id":""}],"next":"交付检查结论"}`}})
 					return
 				}
 				status, artifacts, pending := "completed", []string{"card.html"}, []string{}
@@ -165,7 +171,11 @@ func TestAgentProtocolDelegation(t *testing.T) {
 				t.Fatal(err)
 			}
 			expected := map[bool]string{false: "completed", true: "blocked"}[readOnly]
-			if !result.OK || result.Result.Status != expected || result.ExecutionStatus != "completed" || result.ExecutionReason != "normal" || result.SubagentID == "" || calls.Load() != 2 {
+			expectedCalls := int32(3)
+			if readOnly {
+				expectedCalls = 2
+			}
+			if !result.OK || result.Result.Status != expected || result.ExecutionStatus != "completed" || result.ExecutionReason != "normal" || result.SubagentID == "" || calls.Load() != expectedCalls {
 				t.Fatalf("invalid delegated result: %+v", result)
 			}
 			_, err := os.Stat(filepath.Join(app.runRoot("result", run.store.id), "card.html"))
@@ -244,7 +254,7 @@ func TestAgentProtocolBudget(t *testing.T) {
 	if err := json.Unmarshal([]byte(app.callAgent(context.Background(), run.store, defaultAgents()[0], `{"agent_id":"design","task":"提供设计方向","timeout":5}`)), &result); err != nil {
 		t.Fatal(err)
 	}
-	if !result.OK || result.Result.Status != "partial" || result.ExecutionReason != "budget_reached" || len(result.Result.Pending) == 0 || calls.Load() != int32(agentRoundLimit("design")+1) {
-		t.Fatalf("budget exhaustion was treated as business completion: %+v", result)
+	if !result.OK || result.Result.Status != "completed" || result.ExecutionReason != "normal" || calls.Load() != int32(agentRoundLimit("design")+1) {
+		t.Fatalf("delegated task did not continue after its execution segment: %+v", result)
 	}
 }

@@ -96,7 +96,7 @@ func TestLaunchFilesOnRunEnd(t *testing.T) {
 				close(started)
 				switch status {
 				case "completed":
-					serveModelResponse(w, false, []inputItem{messageOutput("完成")})
+					serveModelResponse(w, false, []inputItem{taskMessageOutput("完成")})
 				case "failed":
 					w.WriteHeader(400)
 					fmt.Fprint(w, `{"error":{"message":"synthetic failure","type":"invalid_request_error"}}`)

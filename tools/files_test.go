@@ -59,3 +59,37 @@ func TestPathIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestFileReadRanges(t *testing.T) {
+	app := testExecutor(t)
+	path := filepath.Join(app.runRoot("result", "file-run"), "range.txt")
+	if err := os.WriteFile(path, []byte("甲乙丙丁abcd"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	maximum := 3
+	value, err := app.readFile("file-run", Args{FilePath: "range.txt", Offset: 2, MaxChars: &maximum})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := value.(map[string]any)
+	if output["content"] != "丙丁a" || output["next_offset"] != 5 || output["truncated"] != true {
+		t.Fatal(output)
+	}
+	hash := output["content_sha256"]
+	value, err = app.readFile("file-run", Args{FilePath: "result/range.txt", Offset: 5, MaxChars: &maximum})
+	if err != nil || value.(map[string]any)["content"] != "bcd" || value.(map[string]any)["truncated"] != false || value.(map[string]any)["content_sha256"] != hash {
+		t.Fatal(value, err)
+	}
+	if err := os.WriteFile(path, []byte("甲乙丙丁abcZ"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	value, err = app.readFile("file-run", Args{FilePath: "range.txt", MaxChars: &maximum})
+	if err != nil || value.(map[string]any)["content_sha256"] == hash {
+		t.Fatal("change outside read range did not change version", err)
+	}
+	for _, offset := range []int{-1, 99} {
+		if _, err := app.readFile("file-run", Args{FilePath: "range.txt", Offset: offset}); err == nil {
+			t.Fatal("invalid offset accepted", offset)
+		}
+	}
+}

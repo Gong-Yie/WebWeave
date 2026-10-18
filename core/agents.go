@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
@@ -186,13 +187,17 @@ func (a *App) handleAgents(r *http.Request) (any, int, error) {
 }
 
 type agentExecution struct {
-	agent     AgentConfig
-	delegated bool
-	taskID    string
-	parentID  string
-	effort    string
-	readOnly  bool
-	outcome   *agentOutcome
+	agent          AgentConfig
+	delegated      bool
+	taskID         string
+	parentID       string
+	effort         string
+	readOnly       bool
+	outcome        *agentOutcome
+	checkpoint     *taskCheckpoint
+	interactive    bool
+	requestTimeout time.Duration
+	parentTaskID   string
 }
 
 type agentExecutionKey struct{}
@@ -204,6 +209,8 @@ func appendAgentEvent(ctx context.Context, store *runStore, kind string, payload
 		payload["delegated"] = execution.delegated
 		if execution.delegated {
 			payload["result_format"] = "agent_result"
+		} else if execution.interactive {
+			payload["result_format"] = "task_result"
 		}
 		if execution.taskID != "" {
 			payload["subagent_id"] = execution.taskID
@@ -214,8 +221,16 @@ func appendAgentEvent(ctx context.Context, store *runStore, kind string, payload
 }
 
 func saveAgentContext(ctx context.Context, store *runStore, items []inputItem, summary any) error {
-	if execution, ok := ctx.Value(agentExecutionKey{}).(agentExecution); ok && execution.delegated {
-		return nil
+	if execution, ok := ctx.Value(agentExecutionKey{}).(agentExecution); ok {
+		if execution.checkpoint != nil {
+			execution.checkpoint.Items = items
+			if err := store.saveTask(execution.checkpoint); err != nil {
+				return err
+			}
+		}
+		if execution.delegated {
+			return nil
+		}
 	}
 	return store.saveContext(items, summary)
 }
@@ -224,6 +239,8 @@ func agentInstructions(agent AgentConfig, cfg RuntimeConfig, id string) string {
 	instructions := strings.NewReplacer("{run_id}", id, "{timeout_default}", fmt.Sprintf("%g", cfg.ToolTimeout.DefaultSeconds), "{timeout_max}", fmt.Sprintf("%g", cfg.ToolTimeout.MaxSeconds)).Replace(systemPrompt)
 	instructions += "\n\n当前 Agent：" + agent.Name + "（ID：" + agent.ID + "）\n角色指令：\n" + agent.Prompt
 	instructions += "\n\n" + collaborationInstructions
+	instructions += "\n系统将长任务分段执行并自动保存、恢复进度。分段预算不是任务完成条件，不必因工具次数自行收尾；复用已有文件与检查证据，只有验收完成、需要用户决策或遇到真实阻塞时才结束当前工作。文件相关验证命令声明 intent=verify，临时服务状态等会变化的检查用 intent=inspect；verify 不得写文件或依赖时变外部状态。"
+	instructions += "\n用 update_task_state 保存当前阶段、本步验收边界、已完成工作、未解决问题及下一步。形成检查结论或连续读取六次前更新，记录结论而不是读取日志；源码审阅用 reviewed，实际运行成功且有工具证据才用 passed。每步达到验收条件后交回结果。恢复与压缩后先沿用持久工作记录，按 offset/max_chars 补读缺少的源码范围。子任务受阻时主 Agent 先核对其证据和当前产物，不原样重新委派；能预览但未完成验收时向用户如实交付当前状态。"
 	if agent.ID == "main" {
 		instructions += "\n委派按顺序进行，明确每项任务的写入范围。模板制作是独立入口，不加入普通网页任务的默认流程。简单微调可直接交前端工程，视觉方案确认后再正式实现；上线前准备具体发布方案供用户确认。\n"
 		instructions += "\n可通过 call_agent 调用以下 Agent。它们共享当前运行文件目录，但有独立的任务上下文；务必提供完整任务、必要背景和文件路径。\n"
@@ -257,6 +274,7 @@ func agentRoundLimit(id string) int {
 
 func agentTools(agent AgentConfig, cfg RuntimeConfig) []responses.ToolUnionParam {
 	definitions := tools.Definitions(cfg.Tools)
+	definitions = append(definitions, taskWorkTool())
 	if agent.ID == "main" {
 		ids := []string{}
 		for _, target := range cfg.Agents {
@@ -270,7 +288,7 @@ func agentTools(agent AgentConfig, cfg RuntimeConfig) []responses.ToolUnionParam
 				"agent_id": map[string]any{"type": "string", "enum": ids},
 				"task":     map[string]any{"type": "string", "description": "本次委派的明确目标"},
 				"contract": agentContractSchema(),
-				"timeout":  map[string]any{"type": "number", "minimum": 0.1},
+				"timeout":  map[string]any{"type": "number", "minimum": 0.1, "description": "委派中单次模型请求的最长等待秒数，不限制任务总时长；每个工具仍有自己的 timeout"},
 			}, "required": []string{"agent_id", "task", "contract", "timeout"}, "additionalProperties": false},
 		}})
 	}
@@ -281,12 +299,17 @@ func agentTools(agent AgentConfig, cfg RuntimeConfig) []responses.ToolUnionParam
 }
 
 func (a *App) callAgent(ctx context.Context, store *runStore, caller AgentConfig, raw string) string {
+	result, _ := a.executeDelegation(ctx, store, caller, raw, nil)
+	return result
+}
+
+func (a *App) executeDelegation(ctx context.Context, store *runStore, caller AgentConfig, raw string, parentTool *taskTool) (string, error) {
 	fail := func(err error) string {
 		data, _ := json.Marshal(map[string]any{"ok": false, "error": err.Error()})
 		return string(data)
 	}
 	if caller.ID != "main" {
-		return fail(errors.New("只有主 Agent 可以调用其他 Agent"))
+		return fail(errors.New("只有主 Agent 可以调用其他 Agent")), nil
 	}
 	var args struct {
 		AgentID  string             `json:"agent_id"`
@@ -295,32 +318,90 @@ func (a *App) callAgent(ctx context.Context, store *runStore, caller AgentConfig
 		Timeout  *float64           `json:"timeout"`
 	}
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		return fail(fmt.Errorf("委派参数无效: %w", err))
+		return fail(fmt.Errorf("委派参数无效: %w", err)), nil
 	}
 	if args.AgentID == "" || args.AgentID == "main" || strings.TrimSpace(args.Task) == "" {
-		return fail(errors.New("必须选择其他 Agent 并填写非空任务"))
+		return fail(errors.New("必须选择其他 Agent 并填写非空任务")), nil
 	}
 	if args.Contract != nil {
 		if err := args.Contract.validate(); err != nil {
-			return fail(err)
+			return fail(err), nil
 		}
 	}
 	cfg := a.config.get()
 	agent, err := findAgent(cfg.Agents, args.AgentID)
 	if err != nil {
-		return fail(err)
+		return fail(err), nil
 	}
 	timeout, err := tools.ResolveTimeout(tools.Config{DefaultSeconds: cfg.ToolTimeout.DefaultSeconds, MaxSeconds: cfg.ToolTimeout.MaxSeconds}, args.Timeout)
 	if err != nil {
-		return fail(err)
+		return fail(err), nil
 	}
-	delegateCtx, cancel := context.WithTimeout(ctx, timeout)
+	delegateCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	parent, _ := ctx.Value(agentExecutionKey{}).(agentExecution)
+	id := workspace.NewID()
+	var checkpoint *taskCheckpoint
+	if parentTool != nil {
+		if parentTool.ChildID == "" {
+			parentTool.ChildID = id
+			if err := store.saveTask(parent.checkpoint); err != nil {
+				return fail(err), err
+			}
+		} else {
+			id = parentTool.ChildID
+			checkpoint, err = store.loadTask(id)
+			if err != nil {
+				return fail(err), err
+			}
+		}
+	}
 	outcome := &agentOutcome{}
-	execution := agentExecution{agent: agent, delegated: true, taskID: workspace.NewID(), parentID: caller.ID, readOnly: agent.ID == "audit" || args.Contract != nil && args.Contract.ReadOnly, outcome: outcome}
+	if checkpoint == nil {
+		checkpoint = &taskCheckpoint{ID: id, AgentID: agent.ID, Contract: args.Contract, Tools: map[string]*taskTool{}}
+		phase := map[string]string{"design": "design", "code": "implementation", "audit": "verification", "template": "implementation"}[agent.ID]
+		if phase == "" {
+			phase = "implementation"
+		}
+		checkpoint.Work = &taskWorkState{Phase: phase, Step: args.Task, Next: "按本次委派验收条件完成工作并交回结果"}
+	} else if checkpoint.Contract == nil {
+		checkpoint.Contract = args.Contract
+	}
+	execution := agentExecution{agent: agent, delegated: true, taskID: id, parentID: caller.ID, readOnly: agent.ID == "audit" || args.Contract != nil && args.Contract.ReadOnly, outcome: outcome, checkpoint: checkpoint, interactive: parent.interactive, requestTimeout: timeout}
+	if parent.checkpoint != nil {
+		execution.parentTaskID = parent.checkpoint.ID
+	}
 	delegateCtx = context.WithValue(delegateCtx, agentExecutionKey{}, execution)
-	if err := appendAgentEvent(delegateCtx, store, "subagent_started", map[string]any{"task": args.Task, "contract": args.Contract, "read_only": execution.readOnly}); err != nil {
-		return fail(err)
+	kind := "subagent_started"
+	if checkpoint.Status != "" {
+		kind = "subagent_resumed"
+		if parent.checkpoint != nil {
+			feedbackItems := append(append([]inputItem{}, parent.checkpoint.Items...), parent.checkpoint.QueuedInput...)
+			for i := len(feedbackItems) - 1; i >= 0; i-- {
+				item := feedbackItems[i]
+				if itemString(item, "role") != "user" {
+					continue
+				}
+				feedback := userText(item)
+				if i > 0 && feedback != checkpoint.Feedback {
+					input := inputItem{"role": "developer", "content": "用户补充反馈，请结合原委派继续：\n" + feedback}
+					if len(pendingTaskCalls(checkpoint.Items)) > 0 {
+						checkpoint.QueuedInput = append(checkpoint.QueuedInput, input)
+					} else {
+						checkpoint.Items = append(checkpoint.Items, input)
+					}
+					checkpoint.Feedback = feedback
+					checkpoint.ReconcileFeedback = parent.checkpoint.ReconcileFeedback
+					checkpoint.RequestRevision = contentKey(feedback)
+					checkpoint.Stalled, checkpoint.Round = 0, 0
+					checkpoint.ReadRepeats, checkpoint.ReadsSinceNote = 0, 0
+				}
+				break
+			}
+		}
+	}
+	if err := appendAgentEvent(delegateCtx, store, kind, map[string]any{"task": args.Task, "contract": args.Contract, "read_only": execution.readOnly}); err != nil {
+		return fail(err), err
 	}
 	task := args.Task
 	if args.Contract != nil {
@@ -330,11 +411,34 @@ func (a *App) callAgent(ctx context.Context, store *runStore, caller AgentConfig
 		}{args.Task, args.Contract})
 		task = string(data)
 	}
-	text, runErr := a.runAgent(delegateCtx, store, []inputItem{{"role": "user", "content": task}}, agent, true)
+	if checkpoint.Items == nil {
+		checkpoint.Items = []inputItem{{"role": "user", "content": task}}
+	}
+	checkpoint.ParentID = execution.parentTaskID
+	if parent.checkpoint != nil && checkpoint.Work != nil {
+		if parent.checkpoint.Work == nil {
+			parent.checkpoint.Work = &taskWorkState{}
+		}
+		parent.checkpoint.Work.Phase = checkpoint.Work.Phase
+		parent.checkpoint.Work.Step = args.Task
+		parent.checkpoint.Work.Next = "核对子任务交付、验收证据和待办，再安排下一步"
+		if err := store.saveTask(parent.checkpoint); err != nil {
+			return fail(err), err
+		}
+	}
+	text, runErr := a.runAgent(delegateCtx, store, checkpoint.Items, agent, true)
 	result := finishAgentCall(agent, execution.taskID, text, runErr, delegateCtx.Err(), outcome.budgetReached)
+	var pause *taskPause
+	if errors.As(runErr, &pause) {
+		if err := appendAgentEvent(delegateCtx, store, "subagent_paused", map[string]any{"status": pause.Status, "reason": pause.Reason}); err != nil {
+			return fail(err), err
+		}
+		data, _ := json.Marshal(result)
+		return string(data), pause
+	}
 	if eventErr := appendAgentEvent(delegateCtx, store, "subagent_finished", map[string]any{"status": result.ExecutionStatus, "reason": result.Error, "execution_reason": result.ExecutionReason, "result": result.Result}); eventErr != nil {
-		return fail(eventErr)
+		return fail(eventErr), eventErr
 	}
 	data, _ := json.Marshal(result)
-	return string(data)
+	return string(data), nil
 }

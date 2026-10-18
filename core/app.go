@@ -106,7 +106,7 @@ func (a *App) Close() {
 	})
 }
 
-func (a *App) startMessage(id, content, agentID string, attachments []string, instanceContext any, resume bool, requestedEffort *string) error {
+func (a *App) startMessage(id, content, agentID string, attachments []string, instanceContext any, resume bool, requestedEffort *string, approvedDecision ...string) error {
 	run, err := a.runtime(id)
 	if err != nil {
 		return err
@@ -122,13 +122,7 @@ func (a *App) startMessage(id, content, agentID string, attachments []string, in
 	if !resume && strings.TrimSpace(content) == "" {
 		return errors.New("消息内容不能为空")
 	}
-	items, err := run.store.loadItems()
-	if err != nil {
-		return err
-	}
-	if resume && len(items) == 0 {
-		return apiError{400, "INVALID_REQUEST", "当前对话没有可继续的上下文"}
-	}
+	var items []inputItem
 	if agentID == "" && resume {
 		state, err := run.store.readState()
 		if err != nil {
@@ -148,6 +142,37 @@ func (a *App) startMessage(id, content, agentID string, attachments []string, in
 	if err != nil {
 		return err
 	}
+	var task *taskCheckpoint
+	var previousTask *taskCheckpoint
+	if state.TaskID != "" {
+		saved, err := run.store.loadTask(state.TaskID)
+		if err != nil {
+			return err
+		}
+		if saved != nil && saved.AgentID == agent.ID && saved.Status != "completed" {
+			task, items = saved, saved.Items
+			task.Round, task.Stalled = 0, 0
+		}
+		if saved != nil && saved.AgentID == agent.ID {
+			previousTask = saved
+		}
+	}
+	if task == nil {
+		items, err = run.store.loadItems()
+		if err != nil {
+			return err
+		}
+		task = &taskCheckpoint{ID: workspace.NewID(), AgentID: agent.ID, Items: items, Tools: map[string]*taskTool{}}
+		if previousTask != nil {
+			task.Work, task.TokenUsage = previousTask.Work, previousTask.TokenUsage
+		}
+	}
+	if resume && len(items) == 0 {
+		return apiError{400, "INVALID_REQUEST", "当前对话没有可继续的上下文"}
+	}
+	if resume && state.PendingDecision != nil {
+		return apiError{409, "DECISION_REQUIRED", "请先回答当前问题或确认方案"}
+	}
 	effort := ""
 	if state.AgentID == agent.ID {
 		effort = state.ReasoningEffort
@@ -157,6 +182,9 @@ func (a *App) startMessage(id, content, agentID string, attachments []string, in
 	}
 	if effort != "" && !slices.Contains(provider.ReasoningEfforts, effort) {
 		return apiError{400, "INVALID_REASONING_EFFORT", "当前 Agent 的模型不支持所选思考强度"}
+	}
+	if err := run.store.selectTask(task.ID); err != nil {
+		return err
 	}
 	if err = run.store.selectAgent(agent); err != nil {
 		return err
@@ -168,6 +196,20 @@ func (a *App) startMessage(id, content, agentID string, attachments []string, in
 		return err
 	}
 	if !resume {
+		task.ReadRepeats, task.ReadsSinceNote = 0, 0
+		task.RequestRevision = contentKey(content)
+		keepDecision := ""
+		if len(approvedDecision) > 0 {
+			keepDecision = approvedDecision[0]
+		}
+		if err := run.store.revokeDeployment(keepDecision); err != nil {
+			return err
+		}
+		if state.PendingDecision != nil {
+			if err := run.store.setDecision(nil); err != nil {
+				return err
+			}
+		}
 		content = strings.TrimSpace(content)
 		modelText := content
 		if len(attachments) > 0 {
@@ -184,7 +226,39 @@ func (a *App) startMessage(id, content, agentID string, attachments []string, in
 			modelText += "\n\n[实例检查上下文]\n" + string(data)
 		}
 		item := inputItem{"role": "user", "content": modelText}
-		items = append(items, item)
+		if len(pendingTaskCalls(task.Items)) > 0 {
+			task.QueuedInput = append(task.QueuedInput, item)
+			if keepDecision == "" {
+				task.ReconcileFeedback = true
+				// A later correction supersedes an earlier retry approval too.
+				for _, record := range task.Tools {
+					record.RetryApproved = false
+					if record.ChildID == "" {
+						continue
+					}
+					child, err := run.store.loadTask(record.ChildID)
+					if err != nil {
+						return err
+					}
+					if child == nil {
+						continue
+					}
+					changed := false
+					for _, operation := range child.Tools {
+						if operation.RetryApproved {
+							operation.RetryApproved, changed = false, true
+						}
+					}
+					if changed {
+						if err := run.store.saveTask(child); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		} else {
+			items = append(items, item)
+		}
 		if err = run.store.append("user_message", map[string]any{"item": item, "display_text": content, "attachments": attachments, "instance_context": instanceContext, "agent_id": agent.ID, "agent_name": agent.Name}); err != nil {
 			return err
 		}
@@ -192,8 +266,12 @@ func (a *App) startMessage(id, content, agentID string, attachments []string, in
 			return err
 		}
 	}
+	task.Items = items
+	if err := run.store.saveTask(task); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(a.ctx)
-	ctx = context.WithValue(ctx, agentExecutionKey{}, agentExecution{effort: effort})
+	ctx = context.WithValue(ctx, agentExecutionKey{}, agentExecution{effort: effort, checkpoint: task, interactive: true})
 	job := &runJob{cancel: cancel, done: make(chan struct{})}
 	run.job = job
 	a.wg.Add(1)
@@ -202,15 +280,25 @@ func (a *App) startMessage(id, content, agentID string, attachments []string, in
 		defer cancel()
 		var jobErr error
 		if len(attachments) > 0 && len(items) > 0 {
-			items[len(items)-1], jobErr = a.prepareUserItem(ctx, id, itemString(items[len(items)-1], "content"), attachments)
+			target := items
+			if len(task.QueuedInput) > 0 {
+				target = task.QueuedInput
+			}
+			target[len(target)-1], jobErr = a.prepareUserItem(ctx, id, itemString(target[len(target)-1], "content"), attachments)
 			if jobErr == nil {
-				jobErr = run.store.saveContext(items, nil)
+				jobErr = run.store.saveTask(task)
 			}
 		}
 		if jobErr == nil {
 			_, jobErr = a.runAgent(ctx, run.store, items, agent, false)
 		}
-		if err := a.ensureLaunchFiles(run); err != nil {
+		var pause *taskPause
+		if err := func() error {
+			if errors.As(jobErr, &pause) {
+				return nil
+			}
+			return a.ensureLaunchFiles(run)
+		}(); err != nil {
 			jobErr = errors.Join(jobErr, fmt.Errorf("生成启动文件失败: %w", err))
 			if ctx.Err() != nil {
 				slog.Error("生成启动文件失败", "run_id", id, "error", err)
@@ -222,8 +310,12 @@ func (a *App) startMessage(id, content, agentID string, attachments []string, in
 		if ctx.Err() != nil {
 			status, reason = "stopped", "用户请求停止"
 		} else if jobErr != nil {
-			status, reason = "failed", jobErr.Error()
-			slog.Error("Agent 任务失败", "run_id", id, "error", jobErr)
+			if errors.As(jobErr, &pause) {
+				status, reason = pause.Status, pause.Reason
+			} else {
+				status, reason = "failed", jobErr.Error()
+				slog.Error("Agent 任务失败", "run_id", id, "error", jobErr)
+			}
 		}
 		if err := run.store.setStatus(status, reason); err != nil {
 			slog.Error("保存任务状态失败", "run_id", id, "error", err)

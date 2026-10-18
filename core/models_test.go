@@ -200,7 +200,7 @@ func TestModelRoutingAndConversationEffort(t *testing.T) {
 				if call == 1 {
 					serveModelResponse(w, false, []inputItem{{"type": "function_call", "id": "fc_delegate", "call_id": "delegate", "name": "call_agent", "arguments": `{"agent_id":"code","task":"制作页面","timeout":5}`}})
 				} else {
-					serveModelResponse(w, false, []inputItem{messageOutput("完成")})
+					serveModelResponse(w, false, []inputItem{taskMessageOutput("完成")})
 				}
 			}))
 			t.Cleanup(server.Close)

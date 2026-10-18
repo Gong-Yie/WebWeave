@@ -271,6 +271,25 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) (any, int, error
 		return nil, 0, apiError{404, "NOT_FOUND", "接口不存在"}
 	}
 	switch parts[3] {
+	case "decisions":
+		if method == "POST" {
+			var answer struct {
+				DecisionID string `json:"decision_id"`
+				Choice     string `json:"choice"`
+			}
+			if err := readJSONBody(r, &answer); err != nil {
+				return nil, 0, err
+			}
+			text, err := a.answerDecision(id, answer.DecisionID, answer.Choice)
+			if err != nil {
+				return nil, 0, err
+			}
+			if err := a.startMessage(id, text, "", nil, nil, false, nil, answer.DecisionID); err != nil {
+				return nil, 0, err
+			}
+			detail, err := a.detail(id)
+			return map[string]any{"ok": true, "run": detail}, 202, err
+		}
 	case "template":
 		if method == "POST" {
 			var request templateSaveRequest

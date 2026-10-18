@@ -45,6 +45,7 @@ class Element {
     const visit = (node) => {
       if (!(node instanceof Element)) return;
       const match = selector.startsWith(".") ? (node.className || "").split(" ").includes(selector.slice(1))
+        : selector === "button" ? node.tagName === "BUTTON"
         : selector.startsWith("input") && node.tagName === "INPUT" && (!selector.includes(":checked") || node.checked);
       if (match) matches.push(node);
       node.children.forEach(visit);
@@ -555,6 +556,49 @@ test("subagent tasks retain separate identities and recover interrupted status",
   assert.equal(recovered[1].status, "stopped");
 });
 
+test("subagent checkpoints resume in one session and retain paused reasons", () => {
+  const { sandbox } = workspaceSandbox();
+  sandbox.events = [
+    { type: "subagent_started", payload: { subagent_id: "one", task: "长任务" } },
+    { type: "task_yielded", payload: { subagent_id: "one", slice: 1 } },
+    { type: "subagent_paused", payload: { subagent_id: "one", status: "blocked", reason: "检查没有进展" } },
+  ];
+  let tasks = vm.runInContext("collectSubagents({ events, job_active: false })", sandbox);
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].status, "blocked");
+  assert.equal(tasks[0].reason, "检查没有进展");
+  sandbox.events.push({ type: "subagent_resumed", payload: { subagent_id: "one" } });
+  tasks = vm.runInContext("collectSubagents({ events, job_active: true })", sandbox);
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].status, "running");
+  assert.equal(tasks[0].reason, "");
+});
+
+test("user decision cards submit their exact ID and do not replace approval with continue", async () => {
+  const requests = [];
+  const { sandbox, node } = workspaceSandbox(async (url, options) => {
+    requests.push({ url, body: JSON.parse(options.body) });
+    return { ok: true, headers: { get() { return "application/json"; } }, json: async () => ({ ok: true }) };
+  });
+  node("#prompt-input").value = "";
+  sandbox.run = { run_id: "approval-run", status: "awaiting_user", job_active: false, events: [], state: {
+    pending_decision: { id: "decision-1", kind: "plan", question: "单页深色博客，使用演示文章，是否开始？" },
+  } };
+  const card = vm.runInContext("createDecisionCard(run)", sandbox);
+  const buttons = card.querySelectorAll("button");
+  assert.equal(buttons.length, 2);
+  assert.equal(buttons[0].textContent, "确认并继续");
+  vm.runInContext("updateActionFromRun(run)", sandbox);
+  assert.equal(vm.runInContext("state.action", sandbox), "idle");
+  await buttons[0].listeners.get("click")[0]();
+  assert.deepEqual(requests, [{ url: "/api/runs/approval-run/decisions", body: { decision_id: "decision-1", choice: "approve" } }]);
+  assert.equal(buttons[0].disabled, true);
+  sandbox.run.status = "blocked";
+  sandbox.run.state.pending_decision = null;
+  vm.runInContext("updateActionFromRun(run)", sandbox);
+  assert.equal(vm.runInContext("state.action", sandbox), "paused");
+});
+
 test("subagent business results remain distinct from execution status and render readable handoffs", () => {
   for (const [execution, business, expected] of [["completed", "partial", "partial"], ["completed", "blocked", "blocked"], ["completed", "failed", "failed"], ["stopped", "failed", "stopped"]]) {
     const { sandbox, node } = workspaceSandbox();
@@ -582,6 +626,19 @@ test("subagent business results remain distinct from execution status and render
     assert.match(body, /方案一.*视觉示意.*演示数据/);
     assert.doesNotMatch(body, /"status"/);
   }
+});
+
+test("plan cards submit the selected visual direction instead of generic approval", async () => {
+  const requests = [];
+  const { sandbox } = workspaceSandbox(async (url, options) => {
+    requests.push(JSON.parse(options.body));
+    return { ok: true, headers: { get() { return "application/json"; } }, json: async () => ({ ok: true }) };
+  });
+  sandbox.run = { run_id: "plan-options", state: { pending_decision: { id: "specific-plan", kind: "plan", question: "请选择方向", options: ["A 深空青蓝", "B 赛博霓虹"] } } };
+  const buttons = vm.runInContext("createDecisionCard(run)", sandbox).querySelectorAll("button");
+  assert.deepEqual(buttons.map(button => button.textContent), ["A 深空青蓝", "B 赛博霓虹", "调整方案"]);
+  await buttons[1].listeners.get("click")[0]();
+  assert.deepEqual(requests, [{ decision_id: "specific-plan", choice: "B 赛博霓虹" }]);
 });
 
 test("reasoning renders once for streaming and nonstreaming responses", () => {
@@ -722,6 +779,9 @@ test("model advanced options start empty and retain unsaved credentials while ed
   node("#model-base-url").value = "https://models.invalid/v1";
   node("#model-name").value = "reasoning-model";
   node("#model-api-key").value = "draft-secret";
+  node("#model-context-window").value = "1000000";
+  node("#model-max-output").value = "65536";
+  node("#model-input-budget").value = "800000";
   node("#model-supports-reasoning").checked = true;
   const inputs = node("#model-supported-efforts").querySelectorAll("input");
   inputs.filter((input) => ["low", "high"].includes(input.value)).forEach((input) => { input.checked = true; });
@@ -732,6 +792,9 @@ test("model advanced options start empty and retain unsaved credentials while ed
   assert.equal(model.api_key, "draft-secret");
   assert.deepEqual(Array.from(model.reasoning_efforts), ["low", "high"]);
   assert.equal(model.reasoning_effort, "high");
+  assert.equal(model.context_window, 1000000);
+  assert.equal(model.max_output_tokens, 65536);
+  assert.equal(model.input_budget, 800000);
 });
 
 test("agent model and conversation effort selectors follow the effective provider", () => {

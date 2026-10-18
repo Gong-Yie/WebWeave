@@ -109,7 +109,7 @@ func parseAgentResult(text string) (agentResult, error) {
 }
 
 func stringArraySchema(description string) map[string]any {
-	return map[string]any{"type": "array", "items": map[string]any{"type": "string", "minLength": 1}, "description": description}
+	return map[string]any{"type": "array", "items": map[string]any{"type": "string", "pattern": `\S`}, "description": description}
 }
 
 func agentContractSchema() map[string]any {
@@ -184,9 +184,9 @@ func finishAgentCall(agent AgentConfig, taskID, text string, runErr, contextErr 
 		if budgetReached {
 			result.ExecutionReason = "budget_reached"
 		}
-		if contextErr != nil {
+		if contextErr != nil || errors.Is(runErr, context.DeadlineExceeded) {
 			result.ExecutionStatus, result.ExecutionReason = "stopped", "cancelled"
-			if errors.Is(contextErr, context.DeadlineExceeded) {
+			if errors.Is(contextErr, context.DeadlineExceeded) || errors.Is(runErr, context.DeadlineExceeded) {
 				result.ExecutionReason = "timeout"
 			}
 		}
@@ -205,7 +205,7 @@ func readOnlyAgentTools(definitions []responses.ToolUnionParam) []responses.Tool
 			continue
 		}
 		switch tool.Name {
-		case "list_skills", "read_skill", "file_read", "read_context_segment":
+		case "list_skills", "read_skill", "file_read", "read_context_segment", "update_task_state":
 		case "web_search", "web_instance":
 			parameters := tool.Parameters
 			properties := parameters["properties"].(map[string]any)

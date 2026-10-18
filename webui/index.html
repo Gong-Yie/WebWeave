@@ -334,7 +334,7 @@
                 <div class="context-settings">
                   <div class="setting-line"><span><strong>启用自动压缩</strong><small>分块合并任务记忆，保留近期交互</small></span><label class="switch"><input id="context-enabled" type="checkbox" /><span></span></label></div>
                   <div class="field-grid">
-                    <label><span>最大输入 Token</span><input id="context-max-input" type="number" min="1" /></label>
+                    <label><span>未知容量模型的输入预算</span><input id="context-max-input" type="number" min="1" /></label>
                     <label><span>触发比例</span><input id="context-trigger" type="number" min="0.01" max="0.99" step="0.01" /></label>
                     <label><span>保留最近项目</span><input id="context-keep" type="number" min="1" /></label>
                     <label><span>摘要最大 Token</span><input id="context-summary" type="number" min="1" /></label>
@@ -371,6 +371,12 @@
                 </div>
                 <details id="model-advanced" class="model-advanced"><summary>高级项<i data-lucide="chevron-down"></i></summary>
                   <div class="model-advanced-content">
+                    <p>官方 DeepSeek Flash / V4 Pro 自动使用 1M 上下文并预留输出空间。其他接口请按实际能力填写；留空使用默认值。</p>
+                    <div class="field-grid">
+                      <label><span>上下文容量 Token</span><input id="model-context-window" type="number" min="1" placeholder="自动或使用全局预算" /></label>
+                      <label><span>最大输出 Token（含思考）</span><input id="model-max-output" type="number" min="1" placeholder="自动预留" /></label>
+                      <label><span>输入预算上限（可选）</span><input id="model-input-budget" type="number" min="1" placeholder="用于主动控制成本" /></label>
+                    </div>
                     <div class="model-advanced-heading"><div><strong>自定义 Headers</strong><p>为空时使用接口默认请求头。</p></div><button id="model-header-add" class="text-button" type="button"><i data-lucide="plus"></i>添加 Header</button></div>
                     <div id="model-headers" class="model-headers"></div>
                     <label class="reasoning-capability"><input id="model-supports-reasoning" type="checkbox" /><span>模型支持思考强度设置</span></label>

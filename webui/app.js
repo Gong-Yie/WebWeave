@@ -332,6 +332,8 @@ function statusLabel(status) {
     completed: "已完成",
     partial: "部分完成",
     blocked: "待决策或补充信息",
+    awaiting_user: "等待你确认",
+    yielded: "已保存，继续执行",
     failed: "执行失败",
   }[status] || status || "等待输入";
 }
@@ -430,7 +432,7 @@ function renderDashboardRuns() {
     { label: "正在执行", tone: "running", statuses: ["running", "stopping"] },
     { label: "已完成", tone: "completed", statuses: ["completed"] },
     { label: "执行失败", tone: "failed", statuses: ["failed"] },
-    { label: "等待 / 已停止", tone: "waiting", statuses: ["waiting", "stopped"] },
+    { label: "等待 / 已停止", tone: "waiting", statuses: ["waiting", "stopped", "awaiting_user", "blocked"] },
   ];
   const counts = groups.map((group) =>
     state.runs.filter((run) => group.statuses.includes(run.status)).length,
@@ -640,6 +642,17 @@ function collectSubagents(run) {
       task.result = payload.result;
       task.reason = payload.reason;
       task.activity = payload.reason || payload.result?.summary || (payload.status === "completed" ? "结果已返回主 Agent" : statusLabel(task.status));
+    }
+    if (event.type === "subagent_resumed") {
+      task.status = "running";
+      task.reason = "";
+      task.activity = "已恢复检查点，继续执行";
+    }
+    if (event.type === "task_yielded") task.activity = `第 ${payload.slice} 段进度已保存，继续执行`;
+    if (event.type === "subagent_paused") {
+      task.status = payload.status;
+      task.reason = payload.reason;
+      task.activity = payload.reason;
     }
   }
   for (const task of tasks.values()) {
@@ -902,7 +915,7 @@ function renderConversation(run, task = null) {
       return;
     }
     if (event.type === "model_output_delta") {
-      if (event.payload?.result_format === "agent_result") return;
+      if (["agent_result", "task_result"].includes(event.payload?.result_format)) return;
       flushTools();
       const agentName = event.payload?.agent_name || "WebWeave";
       if (agentName !== streamedAgent) flushStreamedText();
@@ -921,9 +934,15 @@ function renderConversation(run, task = null) {
       if (reasoning) showReasoning(reasoning, event.payload || {}, index);
       reasoningBlock = null;
       reasoningParts.clear();
-      const text = event.payload?.result_format === "agent_result"
+      let text = event.payload?.result_format === "agent_result"
         ? (task?.result && event.payload?.output_text?.trim() ? agentResultText(task.result) : "")
         : event.payload?.output_text;
+      if (event.payload?.result_format === "task_result" && text) {
+        try {
+          const result = JSON.parse(text);
+          if (typeof result.summary === "string" && typeof result.status === "string") text = agentResultText(result);
+        } catch { /* Older compatible endpoints may still return plain text. */ }
+      }
       flushTools();
       if (typeof text === "string" && text.trim()) {
         streamedText = text;
@@ -937,6 +956,13 @@ function renderConversation(run, task = null) {
   flushTools();
   flushStreamedText();
 
+  if (!task && run.state?.pending_decision) {
+    container.append(createDecisionCard(run));
+  }
+  if (!task && run.status === "blocked") {
+    const reason = [...run.events].reverse().find((event) => event.type === "run_status")?.payload?.reason;
+    if (reason) container.append(element("div", "subagent-result", reason));
+  }
   if (task && task.status !== "running") {
     const result = element("div", "subagent-result", task.reason || task.activity);
     result.dataset.status = task.status;
@@ -957,6 +983,37 @@ function renderConversation(run, task = null) {
   }
   refreshIcons();
   container.scrollTop = shouldStick ? container.scrollHeight : previousScroll;
+}
+
+function createDecisionCard(run) {
+  const decision = run.state.pending_decision;
+  const card = element("article", "message message-agent");
+  card.append(element("div", "message-author", "需要你决定"), element("div", "message-body", decision.question));
+  const actions = element("div", "decision-actions");
+  const choices = decision.kind === "question" || decision.kind === "plan" && decision.options?.length
+    ? [...(decision.options || []).map((option) => [option, option]), ...(decision.kind === "plan" ? [["调整方案", "revise"]] : [])]
+    : [[decision.kind === "recovery" ? "已核对，允许重试这一步" : "确认并继续", "approve"], ...(decision.kind === "recovery" ? [] : [["调整方案", "revise"]])];
+  choices.forEach(([label, choice]) => {
+    const button = element("button", "text-button", label);
+    button.type = "button";
+    button.disabled = run.job_active;
+    button.addEventListener("click", () => runSafely(async () => {
+      if (button.disabled) return;
+      actions.querySelectorAll("button").forEach((entry) => { entry.disabled = true; });
+      try {
+        await api(`/api/runs/${encodeURIComponent(run.run_id)}/decisions`, {
+          method: "POST", body: JSON.stringify({ decision_id: decision.id, choice }),
+        });
+        await loadActiveRun(true);
+      } catch (error) {
+        actions.querySelectorAll("button").forEach((entry) => { entry.disabled = false; });
+        throw error;
+      }
+    }));
+    actions.append(button);
+  });
+  card.append(actions);
+  return card;
 }
 
 function createUserMessage(payload) {
@@ -1105,7 +1162,7 @@ function renderActivity(run) {
 function updateActionFromRun(run) {
   if (run.job_active || ["running", "stopping"].includes(run.status)) {
     updateAction("running", run.status);
-  } else if (run.status === "stopped" && !promptInput.value.trim()) {
+  } else if (["stopped", "blocked"].includes(run.status) && !run.state?.pending_decision && !promptInput.value.trim()) {
     updateAction("paused", run.status);
   } else {
     updateAction("idle", run.status);
@@ -1818,6 +1875,9 @@ function openModelEditor(model = null) {
   $("#model-editor-save").textContent = model ? "更新列表" : "加入列表";
   $("#model-base-url").value = model?.base_url || "";
   $("#model-name").value = model?.model || "";
+  $("#model-context-window").value = model?.context_window || "";
+  $("#model-max-output").value = model?.max_output_tokens || "";
+  $("#model-input-budget").value = model?.input_budget || "";
   if (model?.api_key && model.api_key !== "********") {
     $("#model-api-key").value = model.api_key;
     $("#model-api-key").dataset.masked = "false";
@@ -1887,6 +1947,14 @@ function readModelEditor() {
     api_key: $("#model-api-key").dataset.masked === "true" ? $("#model-api-key").value : $("#model-api-key").value.trim(),
   };
   if (!model.base_url) throw new Error("请填写 Base URL");
+  for (const [key, selector] of [["context_window", "#model-context-window"], ["max_output_tokens", "#model-max-output"], ["input_budget", "#model-input-budget"]]) {
+    const raw = String($(selector).value || "").trim();
+    if (!raw) continue;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error("模型 Token 配置必须为正整数");
+    model[key] = value;
+  }
+  if (model.context_window && model.max_output_tokens >= model.context_window) throw new Error("最大输出必须小于上下文容量");
   if (Object.keys(headers).length) model.headers = headers;
   const efforts = checkedModelEfforts();
   if ($("#model-supports-reasoning").checked && !efforts.length) throw new Error("请勾选该模型实际支持的思考强度档位");

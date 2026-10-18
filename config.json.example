@@ -4,6 +4,8 @@
       {
         "id": "main-model",
         "model": "deepseek-v4-flash",
+        "context_window": 1000000,
+        "max_output_tokens": 65536,
         "base_url": "https://api.deepseek.com",
         "api_key": ""
       }

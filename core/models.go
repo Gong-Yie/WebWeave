@@ -42,6 +42,10 @@ func validateProvider(provider *ProviderConfig, requireModel bool) error {
 	if requireModel && provider.Model == "" {
 		return errors.New("模型名称不能为空")
 	}
+	window := modelContextWindow(*provider)
+	if provider.ContextWindow < 0 || provider.MaxOutputTokens < 0 || provider.InputBudget < 0 || window > 0 && provider.MaxOutputTokens >= window {
+		return errors.New("模型上下文、输出和输入预算必须非负，输出预算必须小于上下文容量")
+	}
 	for key, value := range provider.Headers {
 		if !headerName.MatchString(key) || !validHeaderValue(value) {
 			return errors.New("自定义 Header 名称或值无效")

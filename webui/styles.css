@@ -3138,10 +3138,13 @@ body.is-resizing iframe {
 
 .success-badge[data-status="stopped"],
 .success-badge[data-status="partial"],
+.success-badge[data-status="awaiting_user"],
 .success-badge[data-status="blocked"] {
   background: #eeeae3;
   color: #6f6252;
 }
+
+.decision-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
 
 .instance-canvas {
   position: relative;

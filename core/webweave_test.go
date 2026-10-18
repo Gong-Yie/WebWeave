@@ -57,6 +57,16 @@ func testRun(t *testing.T, app *App, id string) *runRuntime {
 	if err := run.store.setStatus("waiting", "新建对话"); err != nil {
 		t.Fatal(err)
 	}
+	// Execution fixtures begin after the user's plan confirmation. The initial
+	// confirmation gate is exercised separately through newly created API runs.
+	state, err := run.store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Approvals = map[string]userDecision{"plan": {ID: "fixture-plan", Kind: "plan", Question: "已确认的测试任务范围", AnsweredAt: workspace.Timestamp()}}
+	if err := workspace.WriteJSONAtomic(filepath.Join(run.store.dir, "state.json"), state); err != nil {
+		t.Fatal(err)
+	}
 	return run
 }
 
@@ -98,6 +108,16 @@ func useProvider(t *testing.T, app *App, address string, streaming bool) Runtime
 
 func messageOutput(text string) inputItem {
 	return inputItem{"type": "message", "id": "msg_test", "role": "assistant", "status": "completed", "content": []inputItem{{"type": "output_text", "text": text, "annotations": []any{}}}}
+}
+
+// Interactive and delegated fixtures must honor the requested result schema.
+// Raw messageOutput remains available for summary and malformed-result tests.
+func taskMessageOutput(summary string) inputItem {
+	data, err := json.Marshal(agentResult{Status: "completed", Summary: summary, Artifacts: []string{}, Verification: []string{"未验证：此响应仅用于隔离的执行流程测试"}, Pending: []string{}, Questions: []string{}, Previews: []agentPreview{}})
+	if err != nil {
+		panic(err)
+	}
+	return messageOutput(string(data))
 }
 
 func serveModelResponse(w http.ResponseWriter, stream bool, output []inputItem) {
@@ -341,7 +361,7 @@ func TestAgentSDKToolLoop(t *testing.T) {
 				}
 				if calls.Add(1) == 1 {
 					tools := request["tools"].([]any)
-					if len(tools) != 9 {
+					if len(tools) != 11 {
 						t.Errorf("tool count %d", len(tools))
 					}
 					for _, tool := range tools {
@@ -362,7 +382,7 @@ func TestAgentSDKToolLoop(t *testing.T) {
 							t.Error("tool output missing")
 						}
 					}
-					serveModelResponse(w, streaming, []inputItem{messageOutput("网页已生成")})
+					serveModelResponse(w, streaming, []inputItem{taskMessageOutput("网页已生成")})
 				}
 			}))
 			t.Cleanup(server.Close)
@@ -407,7 +427,7 @@ func TestAgentStopContinueAndConflict(t *testing.T) {
 			<-r.Context().Done()
 			return
 		}
-		serveModelResponse(w, true, []inputItem{messageOutput("继续完成")})
+		serveModelResponse(w, true, []inputItem{taskMessageOutput("继续完成")})
 	}))
 	t.Cleanup(server.Close)
 	useProvider(t, app, server.URL, true)
@@ -448,7 +468,7 @@ func TestModelRetryAndPermanentFailure(t *testing.T) {
 					fmt.Fprint(w, `{"error":{"message":"fixture error","type":"invalid_request_error","code":"fixture"}}`)
 					return
 				}
-				serveModelResponse(w, false, []inputItem{messageOutput("重试完成")})
+				serveModelResponse(w, false, []inputItem{taskMessageOutput("重试完成")})
 			}))
 			t.Cleanup(server.Close)
 			useProvider(t, app, server.URL, false)
@@ -679,7 +699,7 @@ func TestInstanceLifecycle(t *testing.T) {
 func TestCLIUsesSharedAgent(t *testing.T) {
 	app := testApp(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		serveModelResponse(w, false, []inputItem{messageOutput("命令行已完成")})
+		serveModelResponse(w, false, []inputItem{taskMessageOutput("命令行已完成")})
 	}))
 	t.Cleanup(server.Close)
 	useProvider(t, app, server.URL, false)

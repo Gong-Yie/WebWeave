@@ -22,6 +22,9 @@ type ProviderConfig struct {
 	Headers          map[string]string `json:"headers,omitempty"`
 	ReasoningEfforts []string          `json:"reasoning_efforts,omitempty"`
 	ReasoningEffort  string            `json:"reasoning_effort,omitempty"`
+	ContextWindow    int               `json:"context_window,omitempty"`
+	MaxOutputTokens  int               `json:"max_output_tokens,omitempty"`
+	InputBudget      int               `json:"input_budget,omitempty"`
 }
 
 type ModelConfig struct {

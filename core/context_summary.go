@@ -3,12 +3,69 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
+	"webweave/workspace"
 )
+
+type summaryProgress struct {
+	Key       string         `json:"key"`
+	Summary   contextSummary `json:"summary"`
+	Remaining []string       `json:"remaining"`
+	Batches   int            `json:"batches"`
+}
+
+// Enforce limits locally as compatible endpoints do not all support maxItems.
+// The archive chains exact prior snapshots; no path or error ID is cut in half.
+func (a *App) boundSummary(store *runStore, summary contextSummary, maximum int) (contextSummary, error) {
+	count := max(1, min(6, maximum/1024))
+	chars := max(1, min(96, maximum/32))
+	goalChars := max(1, min(192, maximum/8))
+	data, err := json.Marshal(summary)
+	if err != nil {
+		return summary, err
+	}
+	bounded := utf8.RuneCountInString(summary.Goal) <= goalChars && utf8.RuneCountInString(summary.LatestUserIntent) <= goalChars
+	for _, values := range [][]string{summary.Decisions, summary.Completed, summary.Pending, summary.Artifacts, summary.Errors, summary.Uncertain} {
+		bounded = bounded && len(values) <= count
+		for _, value := range values {
+			bounded = bounded && (utf8.RuneCountInString(value) <= chars || strings.HasPrefix(value, "[原文片段:"))
+		}
+	}
+	if bounded {
+		return summary, nil
+	}
+	segment, err := workspace.SaveContextSegment(a.root, store.id, "context_summary", "历史摘要完整记录", string(data))
+	if err != nil {
+		return summary, err
+	}
+	reference := "[原文片段:" + segment.ID + "]"
+	if utf8.RuneCountInString(summary.Goal) > goalChars {
+		summary.Goal = reference
+	}
+	if utf8.RuneCountInString(summary.LatestUserIntent) > goalChars {
+		summary.LatestUserIntent = reference
+	}
+	for _, values := range []*[]string{&summary.Decisions, &summary.Completed, &summary.Pending, &summary.Artifacts, &summary.Errors, &summary.Uncertain} {
+		copy := append([]string(nil), (*values)...)
+		if len(copy) > count {
+			copy = append(copy[:count-1], reference)
+		}
+		for i, value := range copy {
+			if utf8.RuneCountInString(value) > chars {
+				copy[i] = reference
+			}
+		}
+		*values = copy
+	}
+	summary.Archive = segment.ID
+	return summary, nil
+}
 
 type summaryRequest struct {
 	Previous contextSummary `json:"previous_summary"`
@@ -20,11 +77,19 @@ type summaryRequest struct {
 func summaryParams(provider ProviderConfig, maximum int) responses.ResponseNewParams {
 	properties := map[string]any{}
 	required := []string{"goal", "latest_user_intent", "decisions", "completed", "pending", "artifacts", "errors", "uncertain"}
+	// Leave output room for JSON syntax and tokenization differences; each batch
+	// replaces a bounded working memory instead of appending a growing transcript.
+	goalChars := max(1, min(192, maximum/8))
+	listItems := max(1, min(6, maximum/1024))
+	itemChars := max(1, min(96, maximum/32))
 	for _, name := range required {
 		if name == "goal" || name == "latest_user_intent" {
-			properties[name] = map[string]any{"type": "string"}
+			properties[name] = map[string]any{"type": "string", "pattern": fmt.Sprintf(`^[\s\S]{0,%d}$`, goalChars)}
 		} else {
-			properties[name] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+			properties[name] = map[string]any{
+				"type": "array", "description": fmt.Sprintf("最多 %d 条，每批归并去重，不逐条追加执行日志", listItems),
+				"items": map[string]any{"type": "string", "pattern": fmt.Sprintf(`^[\s\S]{0,%d}$`, itemChars)},
+			}
 		}
 	}
 	params := responses.ResponseNewParams{Model: provider.Model, Instructions: openai.String(compressionInstructions), MaxOutputTokens: openai.Int(int64(maximum))}

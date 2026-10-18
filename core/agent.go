@@ -64,7 +64,7 @@ func newClient(provider ProviderConfig) (openai.Client, error) {
 	return openai.NewClient(options...), nil
 }
 
-func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, agent AgentConfig, delegated bool) (string, error) {
+func (a *App) runAgentSegment(ctx context.Context, store *runStore, items []inputItem, agent AgentConfig, delegated bool) (string, error) {
 	execution, _ := ctx.Value(agentExecutionKey{}).(agentExecution)
 	execution.agent, execution.delegated = agent, delegated
 	execution.readOnly = execution.readOnly || agent.ID == "audit"
@@ -77,30 +77,41 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 		}
 		templateSkill = "\n\n默认 Skill：template-maker\n" + document.Instructions
 	}
-	items = repairItems(items)
 	if err := saveAgentContext(ctx, store, items, nil); err != nil {
 		return "", err
 	}
 	limit := agentRoundLimit(agent.ID)
 	var compressionErr error
 	localCompressionFailed := false
-	for round := 0; ; round++ {
+	for {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		cfg := a.config.get()
-		var err error
-		compactCfg := cfg
-		if localCompressionFailed {
-			compactCfg.Context.LocalCompression.Enabled = false
+		if execution.checkpoint.Round >= limit {
+			return "", errTaskYield
 		}
-		items, err = a.compactAgentContext(ctx, store, items, compactCfg)
-		if err != nil {
-			if !errors.Is(err, errContextCompression) {
+		if calls := pendingTaskCalls(items); len(calls) > 0 {
+			var err error
+			items, err = a.executeTaskCalls(ctx, store, items, calls, agent)
+			if err != nil {
 				return "", err
 			}
-			localCompressionFailed = true
+			execution.checkpoint.Round++
+			if err := saveAgentContext(ctx, store, items, nil); err != nil {
+				return "", err
+			}
+			continue
 		}
+		if len(execution.checkpoint.QueuedInput) > 0 {
+			items = append(items, execution.checkpoint.QueuedInput...)
+			execution.checkpoint.QueuedInput = nil
+			execution.checkpoint.ReconcileFeedback = false
+			if err := saveAgentContext(ctx, store, items, nil); err != nil {
+				return "", err
+			}
+		}
+		cfg := a.config.get()
+		var err error
 		provider, err := providerForAgent(cfg, agent)
 		if err != nil {
 			return "", err
@@ -116,14 +127,30 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 		if err != nil {
 			return "", err
 		}
-		params := responses.ResponseNewParams{Model: provider.Model, Instructions: openai.String(agentInstructions(agent, cfg, store.id) + templateSkill), Tools: agentTools(agent, cfg)}
+		memory, err := a.taskMemory(ctx, store)
+		if err != nil {
+			return "", err
+		}
+		params := responses.ResponseNewParams{Model: provider.Model, Instructions: openai.String(agentInstructions(agent, cfg, store.id) + templateSkill + memory), Tools: agentTools(agent, cfg)}
+		inputBudget, outputBudget := modelContextBudget(provider, cfg.Context.MaxInputTokens)
+		cfg.Context.MaxInputTokens = inputBudget
+		if outputBudget > 0 {
+			params.MaxOutputTokens = openai.Int(int64(outputBudget))
+		}
 		if execution.readOnly {
 			params.Tools = readOnlyAgentTools(params.Tools)
 			params.Instructions = openai.String(params.Instructions.Value + "\n本次任务只读：不得修改项目文件、下载文件、执行终端命令或改变实例状态。需要修改或运行检查时返回具体要求交主 Agent 安排。")
 		}
-		if delegated {
+		if delegated || execution.interactive {
 			params.Text.Format.OfJSONSchema = agentResultFormat()
 			params.Instructions = openai.String(params.Instructions.Value + "\n\n" + delegatedResultInstructions)
+			if !delegated {
+				params.Instructions = openai.String(params.Instructions.Value + "\n本次是主对话：结果状态对应当前阶段。需要用户回答时调用 request_user_decision；完成、部分完成、受阻与失败按实际结果报告，界面会将 JSON 转成可读文字。")
+			}
+		}
+		if execution.interactive && !delegated {
+			params.Tools = append(params.Tools, decisionTool())
+			params.Instructions = openai.String(params.Instructions.Value + "\n执行约定：首次写入或委派正式实现前，必须用 request_user_decision 展示需求范围与视觉方案并等待用户操作确认；confirmed 数组和普通回复不能授予权限。需要改变已确认方案或正式上线时再次请求对应确认。普通信息问题使用 kind=question。终端验证声明 intent=verify，复用已有证据，不生成反复探测脚本。")
 		}
 		if len(provider.ReasoningEfforts) == 0 {
 			params.Temperature = openai.Float(0.7)
@@ -134,18 +161,29 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 		if cfg.Model.ReasoningSummary {
 			params.Reasoning.Summary = shared.ReasoningSummaryAuto
 		}
-		if round == limit {
-			if execution.outcome != nil {
-				execution.outcome.budgetReached = true
+		threshold := max(1, int(float64(inputBudget)*cfg.Context.TriggerRatio))
+		estimateItems := func(values []inputItem) int {
+			return calibratedTokens(estimateRequestTokens(params, values), provider, execution.checkpoint.TokenUsage)
+		}
+		estimate := func() int {
+			return estimateItems(items)
+		}
+		// Keep the current working material intact while it fits the model budget.
+		// KeepRecentItems is a retention floor under pressure, not a pruning timer.
+		if !cfg.Context.Enabled || estimate() >= threshold {
+			compactCfg := cfg
+			if localCompressionFailed {
+				compactCfg.Context.LocalCompression.Enabled = false
 			}
-			params.Tools = nil
-			params.ToolChoice.OfToolChoiceMode = openai.Opt(responses.ToolChoiceOptionsNone)
-			params.Instructions = openai.String(params.Instructions.Value + "\n本次执行已达到工具轮次预算。本轮必须收尾：说明实际完成的文件、验证结果、预览入口和未完成事项，不再调用工具，不得把未完成任务说成已完成。")
-			if err := appendAgentEvent(ctx, store, "agent_budget_reached", map[string]any{"tool_rounds": limit}); err != nil {
-				return "", err
+			items, err = a.compactAgentContext(ctx, store, items, compactCfg)
+			if err != nil {
+				if !errors.Is(err, errContextCompression) {
+					return "", err
+				}
+				localCompressionFailed = true
 			}
 		}
-		if cfg.Context.Enabled && compressionErr == nil && estimateRequestTokens(params, items) >= int(float64(cfg.Context.MaxInputTokens)*cfg.Context.TriggerRatio) {
+		if cfg.Context.Enabled && compressionErr == nil && estimate() >= threshold {
 			cfg.LLM.Main = provider
 			items, err = a.compressContext(ctx, client, store, items, cfg)
 			if err != nil {
@@ -156,22 +194,39 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 				compressionErr = err
 			}
 		}
-		inputTokens := estimateRequestTokens(params, items)
-		if cfg.Context.Enabled && inputTokens > cfg.Context.MaxInputTokens {
+		if cfg.Context.Enabled && estimate() > inputBudget {
+			items, err = a.fitRequestContext(store, items, threshold, estimateItems)
+			if err != nil {
+				return "", err
+			}
+			if err := saveAgentContext(ctx, store, items, nil); err != nil {
+				return "", err
+			}
+		}
+		rawTokens := estimateRequestTokens(params, items)
+		inputTokens := estimate()
+		if inputTokens > inputBudget {
 			if compressionErr != nil {
 				return "", fmt.Errorf("上下文估算输入 %d Token 超过输入预算 %d，原上下文已保留；调整模型或压缩配置后继续: %w", inputTokens, cfg.Context.MaxInputTokens, compressionErr)
 			}
 			return "", fmt.Errorf("压缩后上下文估算输入 %d Token 仍超过输入预算 %d，无法继续请求模型", inputTokens, cfg.Context.MaxInputTokens)
 		}
-		if err := appendAgentEvent(ctx, store, "context_usage", map[string]any{"input_tokens": inputTokens, "estimated": true}); err != nil {
+		if err := appendAgentEvent(ctx, store, "context_usage", map[string]any{"input_tokens": inputTokens, "estimated": true, "threshold": threshold, "input_budget": inputBudget}); err != nil {
 			return "", err
 		}
-		response, err := modelResponse(ctx, client, params, items, cfg.Model.Stream, store)
+		requestCtx := ctx
+		cancel := func() {}
+		if execution.requestTimeout > 0 {
+			requestCtx, cancel = context.WithTimeout(ctx, execution.requestTimeout)
+		}
+		response, err := modelResponse(requestCtx, client, params, items, cfg.Model.Stream, store)
+		cancel()
 		if err != nil {
 			return "", err
 		}
 		if response.Usage.InputTokens > 0 {
-			if err := appendAgentEvent(ctx, store, "context_usage", map[string]any{"input_tokens": response.Usage.InputTokens, "estimated": false}); err != nil {
+			execution.checkpoint.TokenUsage = taskTokenUsage{Provider: providerIdentity(provider), Estimated: rawTokens, Actual: int(response.Usage.InputTokens)}
+			if err := appendAgentEvent(ctx, store, "context_usage", map[string]any{"input_tokens": response.Usage.InputTokens, "estimated": false, "threshold": threshold, "input_budget": inputBudget}); err != nil {
 				return "", err
 			}
 		}
@@ -182,6 +237,18 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 				return "", fmt.Errorf("解析模型输出: %w", err)
 			}
 			outputs = append(outputs, item)
+		}
+		for _, item := range outputs {
+			if itemString(item, "type") != "function_call" {
+				continue
+			}
+			id := callID(item)
+			if id == "" || execution.checkpoint.Tools[id] != nil {
+				if err := appendAgentEvent(ctx, store, "model_protocol_error", map[string]any{"items": outputs, "reason": "empty or reused call_id"}); err != nil {
+					return "", err
+				}
+				return "", &taskPause{"blocked", "模型返回空或重复的工具调用 ID，已保留原检查点，未重复执行操作"}
+			}
 		}
 		text := response.OutputText()
 		if len(outputs) == 0 && text != "" {
@@ -194,47 +261,8 @@ func (a *App) runAgent(ctx context.Context, store *runStore, items []inputItem, 
 		if err = saveAgentContext(ctx, store, items, nil); err != nil {
 			return "", err
 		}
-		calls := []inputItem{}
-		for _, item := range outputs {
-			if itemString(item, "type") == "function_call" {
-				calls = append(calls, item)
-			}
-		}
-		if round == limit && (len(calls) > 0 || strings.TrimSpace(text) == "") {
-			return "", fmt.Errorf("%s 已达到 %d 轮工具预算，模型未按要求收尾；已有文件已保留", agent.Name, limit)
-		}
-		if len(calls) == 0 {
+		if len(pendingTaskCalls(items)) == 0 {
 			return text, ctx.Err()
-		}
-		for _, call := range calls {
-			started := time.Now()
-			cancelled := ctx.Err() != nil
-			name, arguments := itemString(call, "name"), itemString(call, "arguments")
-			if !cancelled {
-				if err := appendAgentEvent(ctx, store, "tool_started", map[string]any{"tool_name": name, "arguments": arguments}); err != nil {
-					return "", err
-				}
-			}
-			var result string
-			if cancelled {
-				result = `{"ok":false,"error":{"code":"RUN_STOPPED","message":"运行已由用户停止，工具未执行"}}`
-			} else if name == "call_agent" {
-				result = a.callAgent(ctx, store, agent, arguments)
-			} else {
-				result = a.executeTool(ctx, store.id, name, arguments)
-			}
-			id := itemString(call, "call_id")
-			if id == "" {
-				id = itemString(call, "id")
-			}
-			item := inputItem{"type": "function_call_output", "call_id": id, "output": result}
-			items = append(items, item)
-			if err := appendAgentEvent(ctx, store, "tool_output", map[string]any{"tool_name": name, "arguments": arguments, "duration_seconds": time.Since(started).Seconds(), "cancelled": cancelled, "item": item}); err != nil {
-				return "", err
-			}
-			if err := saveAgentContext(ctx, store, items, nil); err != nil {
-				return "", err
-			}
 		}
 	}
 }

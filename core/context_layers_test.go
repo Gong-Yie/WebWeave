@@ -9,9 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"webweave/tools"
 	"webweave/workspace"
@@ -80,6 +82,53 @@ func TestContextSegmentsAndRecall(t *testing.T) {
 			joined := strings.Join(history, "")
 			if err != nil || !strings.Contains(joined, preview.SegmentID) || extension == ".md" && !strings.Contains(joined, "资料正文和背景介绍") || extension == ".html" && strings.Contains(joined, "资料正文和背景介绍") || strings.Contains(joined, "压缩后的资料正文") {
 				t.Fatal("summary consumed lossy observations instead of originals", err)
+			}
+		})
+	}
+}
+
+func TestContextSummaryOutputBudget(t *testing.T) {
+	for _, maximum := range []int{1024, 4096, 8192} {
+		t.Run(fmt.Sprint(maximum), func(t *testing.T) {
+			params := summaryParams(ProviderConfig{Model: "deepseek-v4-pro"}, maximum)
+			properties := params.Text.Format.OfJSONSchema.Schema["properties"].(map[string]any)
+			largest := map[string]any{}
+			for name, raw := range properties {
+				property := raw.(map[string]any)
+				pattern := property
+				if property["type"] == "array" {
+					pattern = property["items"].(map[string]any)
+				}
+				var length int
+				if _, err := fmt.Sscanf(pattern["pattern"].(string), `^[\s\S]{0,%d}$`, &length); err != nil {
+					t.Fatal(err)
+				}
+				bounded := strings.Repeat("字", length)
+				matcher := regexp.MustCompile(pattern["pattern"].(string))
+				if !matcher.MatchString(bounded) || matcher.MatchString(bounded+"字") {
+					t.Fatal("summary string pattern does not constrain length")
+				}
+				if property["type"] == "string" {
+					largest[name] = bounded
+					continue
+				}
+				var count int
+				if _, err := fmt.Sscanf(property["description"].(string), "最多 %d 条", &count); err != nil {
+					t.Fatal(err)
+				}
+				values := []string{}
+				for i := 0; i < count; i++ {
+					values = append(values, bounded)
+				}
+				largest[name] = values
+			}
+			data, err := json.Marshal(largest)
+			if err != nil || utf8.RuneCount(data) >= maximum || params.MaxOutputTokens.Value != int64(maximum) || params.Reasoning.Effort != "none" {
+				t.Fatalf("summary has no output headroom or changed the configured limit: chars=%d max=%d err=%v", utf8.RuneCount(data), maximum, err)
+			}
+			schema, err := json.Marshal(params.Text.Format.OfJSONSchema.Schema)
+			if err != nil || strings.Contains(string(schema), `"maxLength"`) || strings.Contains(string(schema), `"maxItems"`) {
+				t.Fatal("summary schema uses unsupported DeepSeek constraints", err)
 			}
 		})
 	}

@@ -17,7 +17,7 @@ func (a *App) executeTool(ctx context.Context, id, name, raw string) string {
 
 func readOnlyToolAllowed(name, raw string) bool {
 	switch name {
-	case "list_skills", "read_skill", "file_read", "read_context_segment":
+	case "list_skills", "read_skill", "file_read", "read_context_segment", "update_task_state":
 		return true
 	case "web_search", "web_instance":
 		var args tools.Args

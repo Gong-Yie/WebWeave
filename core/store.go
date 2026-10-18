@@ -23,17 +23,20 @@ type runEvent struct {
 }
 
 type runState struct {
-	RunID            string            `json:"run_id"`
-	AgentID          string            `json:"agent_id"`
-	ReasoningEffort  string            `json:"reasoning_effort,omitempty"`
-	Status           string            `json:"status"`
-	UpdatedAt        string            `json:"updated_at"`
-	LastEvent        string            `json:"last_event"`
-	EventCount       int               `json:"event_count"`
-	ContextUpdatedAt string            `json:"context_updated_at,omitempty"`
-	ContextVersion   int               `json:"context_version,omitempty"`
-	Instance         *instanceRecord   `json:"instance,omitempty"`
-	Instances        []*instanceRecord `json:"instances,omitempty"`
+	RunID            string                  `json:"run_id"`
+	AgentID          string                  `json:"agent_id"`
+	ReasoningEffort  string                  `json:"reasoning_effort,omitempty"`
+	Status           string                  `json:"status"`
+	UpdatedAt        string                  `json:"updated_at"`
+	LastEvent        string                  `json:"last_event"`
+	EventCount       int                     `json:"event_count"`
+	ContextUpdatedAt string                  `json:"context_updated_at,omitempty"`
+	ContextVersion   int                     `json:"context_version,omitempty"`
+	TaskID           string                  `json:"task_id,omitempty"`
+	PendingDecision  *userDecision           `json:"pending_decision,omitempty"`
+	Approvals        map[string]userDecision `json:"approvals,omitempty"`
+	Instance         *instanceRecord         `json:"instance,omitempty"`
+	Instances        []*instanceRecord       `json:"instances,omitempty"`
 }
 
 type savedContext struct {

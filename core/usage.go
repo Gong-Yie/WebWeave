@@ -20,6 +20,9 @@ func (a *App) runContextUsage(events []runEvent) contextUsage {
 			usage.InputTokens = int(tokens)
 		}
 		usage.Estimated, _ = event.Payload["estimated"].(bool)
+		if threshold, ok := event.Payload["threshold"].(float64); ok {
+			usage.Threshold = int(threshold)
+		}
 		usage.AgentName, _ = event.Payload["agent_name"].(string)
 		usage.Delegated, _ = event.Payload["delegated"].(bool)
 	}

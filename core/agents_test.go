@@ -144,7 +144,7 @@ func TestMultiAgentSelectionAndResume(t *testing.T) {
 					<-r.Context().Done()
 					return
 				}
-				serveModelResponse(w, true, []inputItem{messageOutput("继续完成")})
+				serveModelResponse(w, true, []inputItem{taskMessageOutput("继续完成")})
 			}))
 			t.Cleanup(server.Close)
 			useProvider(t, app, server.URL, true)
@@ -233,12 +233,12 @@ func TestMultiAgentDelegation(t *testing.T) {
 					}
 					serveModelResponse(w, true, []inputItem{{"type": "function_call", "id": "fc_file", "call_id": "call_file", "name": tool, "arguments": arguments}})
 				case 3:
-					serveModelResponse(w, true, []inputItem{messageOutput("委派结果")})
+					serveModelResponse(w, true, []inputItem{taskMessageOutput("委派结果")})
 				case 4:
 					if len(request.Input) != 3 || itemString(request.Input[2], "call_id") != "call_delegate" || !strings.Contains(itemString(request.Input[2], "output"), "委派结果") {
 						t.Error("delegated result was not returned to the parent")
 					}
-					serveModelResponse(w, true, []inputItem{messageOutput("整合完成")})
+					serveModelResponse(w, true, []inputItem{taskMessageOutput("整合完成")})
 				default:
 					t.Error("unexpected extra model call")
 					serveModelResponse(w, true, []inputItem{messageOutput("额外调用")})

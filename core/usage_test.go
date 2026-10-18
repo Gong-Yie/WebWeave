@@ -30,7 +30,7 @@ func TestReasoningAndContextUsage(t *testing.T) {
 				}
 				response := map[string]any{
 					"id": "resp_reasoning", "object": "response", "status": "completed", "model": "test-model",
-					"output": []inputItem{{"id": "rs_test", "type": "reasoning", "summary": []inputItem{{"type": "summary_text", "text": "先检查布局，再制作模板。"}}}, messageOutput("制作完成")},
+					"output": []inputItem{{"id": "rs_test", "type": "reasoning", "summary": []inputItem{{"type": "summary_text", "text": "先检查布局，再制作模板。"}}}, taskMessageOutput("制作完成")},
 					"usage":  map[string]any{"input_tokens": 1234, "output_tokens": 42, "total_tokens": 1276},
 				}
 				if !streaming {

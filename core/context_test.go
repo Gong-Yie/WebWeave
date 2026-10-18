@@ -86,10 +86,11 @@ func TestContextCompaction(t *testing.T) {
 }
 
 func TestContextCompressionPreservesTask(t *testing.T) {
-	for _, mode := range []string{"valid", "invalid JSON", "HTML response", "incomplete", "failed", "empty summary", "timeout"} {
+	for _, mode := range []string{"valid", "invalid JSON", "HTML response", "incomplete", "failed", "empty summary", "timeout", "late output limit"} {
 		t.Run(mode, func(t *testing.T) {
 			app := testApp(t)
 			run := testRun(t, app, "compression-task")
+			var batches atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var request struct {
 					Input        string `json:"input"`
@@ -105,6 +106,19 @@ func TestContextCompressionPreservesTask(t *testing.T) {
 				}
 				if request.Instructions != compressionInstructions || strings.Contains(request.Input, "你是上下文压缩器") || request.MaxOutput != 4096 {
 					t.Error("compression instructions or output budget mismatch")
+				}
+				if mode == "late output limit" {
+					if batches.Add(1) <= 5 {
+						serveModelResponse(w, false, []inputItem{messageOutput(`{"goal":"校园网站","pending":["补全联系信息"]}`)})
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"id": "resp_limit", "object": "response", "status": "incomplete", "output": []any{},
+						"incomplete_details": map[string]any{"reason": "max_output_tokens"},
+						"usage":              map[string]any{"output_tokens": 4096, "output_tokens_details": map[string]any{"reasoning_tokens": 0}},
+					})
+					return
 				}
 				if mode == "timeout" {
 					w.Header().Set("Content-Type", "application/json")
@@ -182,6 +196,9 @@ func TestContextCompressionPreservesTask(t *testing.T) {
 						t.Fatal("response failure diagnostics missing")
 					}
 				}
+				if mode == "late output limit" && (batches.Load() != 6 || last.Payload["summary_batches"] != float64(5) || last.Payload["output_tokens"] != float64(4096) || last.Payload["reasoning_tokens"] != float64(0)) {
+					t.Fatalf("late output exhaustion lost progress metadata or retried: %+v", last)
+				}
 				return
 			}
 			for _, required := range []string{"做一个校园介绍网站", "保持蓝色配色，添加联系信息"} {
@@ -221,7 +238,7 @@ func TestContextCompressionPreservesTask(t *testing.T) {
 }
 
 func TestContextCompressionFailureBudget(t *testing.T) {
-	for _, mode := range []string{"within budget", "failure over budget", "summary over budget"} {
+	for _, mode := range []string{"within budget", "failure over budget", "summary over budget", "irreducible budget"} {
 		t.Run(mode, func(t *testing.T) {
 			app := testApp(t)
 			run := testRun(t, app, "compression-budget")
@@ -262,6 +279,9 @@ func TestContextCompressionFailureBudget(t *testing.T) {
 			if mode != "within budget" {
 				cfg.Context.MaxInputTokens = baseline - 1
 			}
+			if mode == "irreducible budget" {
+				cfg.Context.MaxInputTokens = 1
+			}
 			cfg.Context.TriggerRatio, cfg.Context.KeepRecentItems = 0.5, 1
 			if err := workspace.WriteJSONAtomic(app.config.path, cfg); err != nil {
 				t.Fatal(err)
@@ -270,21 +290,31 @@ func TestContextCompressionFailureBudget(t *testing.T) {
 			if mode != "summary over budget" && summaries.Load() != 1 || mode == "summary over budget" && summaries.Load() < 1 {
 				t.Fatalf("failed compression was repeated: %d", summaries.Load())
 			}
-			if mode == "failure over budget" {
+			if mode == "irreducible budget" {
 				if !errors.Is(err, errContextCompression) || !strings.Contains(err.Error(), "输入预算") || tasks.Load() != 0 {
 					t.Fatalf("oversized input was sent or failure was hidden: %v, requests=%d", err, tasks.Load())
-				}
-			} else if mode == "summary over budget" {
-				if err == nil || !strings.Contains(err.Error(), "压缩后上下文") || tasks.Load() != 0 {
-					t.Fatalf("oversized summarized input was sent: %v, requests=%d", err, tasks.Load())
 				}
 			} else if err != nil || text != "完成" || tasks.Load() != 2 {
 				t.Fatalf("task within budget did not continue: %q %v, requests=%d", text, err, tasks.Load())
 			}
 			saved, err := run.store.loadItems()
-			if mode == "summary over budget" {
-				if err != nil || len(saved) < 2 || userText(saved[1]) != userText(items[0]) {
-					t.Fatal("original user request was lost", err)
+			if mode != "within budget" {
+				// Budget recovery can reference a large user message, but retains
+				// its exact original rather than silently truncating requirements.
+				paths, globErr := filepath.Glob(filepath.Join(run.store.dir, "context_segments", "*.json"))
+				found := false
+				for _, path := range paths {
+					var segment workspace.ContextSegment
+					if readJSONFile(path, &segment) != nil {
+						continue
+					}
+					var original inputItem
+					if json.Unmarshal([]byte(segment.Original), &original) == nil && userText(original) == userText(items[0]) {
+						found = true
+					}
+				}
+				if err != nil || globErr != nil || !found || len(saved) == 0 {
+					t.Fatal("original user request was not recoverable", err, globErr)
 				}
 			} else if err != nil || len(saved) < len(items) || !reflect.DeepEqual(saved[:len(items)], items) {
 				t.Fatal("task history was lost after failed compression", err)
@@ -338,8 +368,8 @@ func TestModelResponseFailureDetails(t *testing.T) {
 }
 
 func TestAgentRoundBudget(t *testing.T) {
-	for _, refuses := range []bool{false, true} {
-		t.Run(fmt.Sprint("refuses=", refuses), func(t *testing.T) {
+	for _, progress := range []bool{true, false} {
+		t.Run(fmt.Sprint("progress=", progress), func(t *testing.T) {
 			app := testApp(t)
 			run := testRun(t, app, "round-budget")
 			var calls atomic.Int32
@@ -353,38 +383,45 @@ func TestAgentRoundBudget(t *testing.T) {
 					return
 				}
 				count := calls.Add(1)
-				if count == int32(agentRoundLimit("audit")+1) {
-					if request.ToolChoice != "none" || len(request.Tools) != 0 {
-						t.Error("final response was still permitted to call tools")
-					}
-					if !refuses {
-						serveModelResponse(w, false, []inputItem{messageOutput("已完成必要检查，交付现有结果；剩余事项待处理")})
-						return
-					}
+				if request.ToolChoice == "none" || len(request.Tools) == 0 {
+					t.Error("segment boundary removed tools or forced a final answer")
+				}
+				if progress && count > int32(agentRoundLimit("code")+2) {
+					serveModelResponse(w, false, []inputItem{messageOutput("全部工作完成")})
+					return
 				}
 				id := fmt.Sprintf("call_%d", count)
-				serveModelResponse(w, false, []inputItem{{"type": "function_call", "id": id, "call_id": id, "name": "list_skills", "arguments": `{"timeout":1}`}})
+				tool, args := "list_skills", `{"timeout":1}`
+				if progress {
+					tool, args = "create_file", fmt.Sprintf(`{"file_path":"index.html","content":"page-%d","timeout":1}`, count)
+				}
+				serveModelResponse(w, false, []inputItem{{"type": "function_call", "id": id, "call_id": id, "name": tool, "arguments": args}})
 			}))
 			t.Cleanup(server.Close)
 			useProvider(t, app, server.URL, false)
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			text, err := app.runAgent(ctx, run.store, []inputItem{{"role": "user", "content": "检查网站"}}, defaultAgents()[3], false)
-			if calls.Load() != int32(agentRoundLimit("audit")+1) || refuses && (err == nil || !strings.Contains(err.Error(), "工具预算")) || !refuses && (err != nil || text == "") {
-				t.Fatalf("tool loop did not stop at its budget: %d %q %v", calls.Load(), text, err)
+			agent := defaultAgents()[3]
+			if progress {
+				agent = defaultAgents()[2]
+			}
+			text, err := app.runAgent(ctx, run.store, []inputItem{{"role": "user", "content": "完成网站"}}, agent, false)
+			var pause *taskPause
+			if progress && (err != nil || text != "全部工作完成" || calls.Load() != int32(agentRoundLimit("code")+3)) || !progress && (!errors.As(err, &pause) || pause.Status != "blocked" || calls.Load() != int32(2*agentRoundLimit("audit"))) {
+				t.Fatalf("task did not continue or pause without progress: %d %q %v", calls.Load(), text, err)
 			}
 			_, events, err := run.store.snapshot()
 			if err != nil {
 				t.Fatal(err)
 			}
-			tools := 0
+			yields := 0
 			for _, event := range events {
-				if event.Type == "tool_output" {
-					tools++
+				if event.Type == "task_yielded" {
+					yields++
 				}
 			}
-			if tools != agentRoundLimit("audit") {
-				t.Fatal("a tool was executed after the budget was exhausted")
+			if yields != 1 {
+				t.Fatal("task segment checkpoint missing")
 			}
 		})
 	}
