@@ -263,3 +263,7 @@ go build -o webweave.exe .
 遇到问题或希望增加功能，可以提交 [Issue](https://github.com/Gong-Yie/WebWeave/issues)，说明操作步骤、错误信息和预期结果。附图或日志前请移除 API Key 等敏感内容。
 
 WebWeave 采用 [Apache License 2.0](LICENSE) 开源。使用、修改和再分发时，请保留许可证及相关版权声明。
+
+欢迎各位大佬进群交流
+
+![QQ群](assert/QQ群.jpg)

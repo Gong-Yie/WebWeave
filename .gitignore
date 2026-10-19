@@ -9,3 +9,4 @@ __pycache__/
 !/data/result/.gitkeep
 /data/run/*
 !/data/run/.gitkeep
+video
